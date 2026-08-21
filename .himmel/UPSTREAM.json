@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/NousResearch/hermes-agent",
+  "tag": "v2026.8.18",
+  "tag_kind": "annotated",
+  "annotated_tag_object_sha": "9f13bbbf8423427e159c78066356ca0e27ca6b74",
+  "peeled_commit_sha": "e624e9fde561e1add9388384012b295fde669ade",
+  "license": "MIT"
+}
