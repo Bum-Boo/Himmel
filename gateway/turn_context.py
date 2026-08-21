@@ -35,6 +35,7 @@ class TurnContext:
 
     # --- read-only turn identity / wiring -------------------------------
     source: Any = None
+    platform_key: str = ""
     _run_still_current: Callable[[], bool] = None  # type: ignore[assignment]
     _live_status_adapter: Any = None
     _live_status_mode: str = "off"
@@ -52,6 +53,7 @@ class TurnContext:
     last_tool: list = field(default_factory=lambda: [None])
     last_was_terminal_block: list = field(default_factory=lambda: [False])
     repeat_count: list = field(default_factory=lambda: [0])
+    persona_progress_count: list = field(default_factory=lambda: [0])
     long_tool_hint_fired: list = field(default_factory=lambda: [False])
     agent_holder: list = field(default_factory=lambda: [None])
 

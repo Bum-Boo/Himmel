@@ -150,6 +150,77 @@ WantedBy=default.target
 
         assert gw.systemd_unit_is_current(system=False) is True
 
+    def test_unit_with_different_hermes_node_bin_path_is_current(self, tmp_path, monkeypatch):
+        from hermes_cli import gateway as gw
+
+        installed = """[Unit]
+Description=Hermes Gateway
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python -m hermes_cli.main --profile serie gateway run
+Environment="PATH=/opt/hermes/venv/bin:/var/lib/hermes-fixture/.hermes/profiles/serie/node/bin:/usr/bin"
+Restart=always
+
+[Install]
+WantedBy=default.target
+"""
+        expected = installed.replace(
+            "/var/lib/hermes-fixture/.hermes/profiles/serie/node/bin",
+            "/var/lib/hermes-fixture/.hermes/node/bin",
+        )
+        unit_file = tmp_path / "hermes-gateway-serie.service"
+        unit_file.write_text(installed)
+        monkeypatch.setattr(gw, "get_systemd_unit_path", lambda system=False: unit_file)
+        monkeypatch.setattr(
+            gw,
+            "generate_systemd_unit",
+            lambda system=False, run_as_user=None: expected,
+        )
+
+        assert gw.systemd_unit_is_current(system=False) is True
+
+    def test_unit_with_different_hermes_node_root_path_is_current(self, tmp_path, monkeypatch):
+        from hermes_cli import gateway as gw
+
+        installed = """[Service]
+Environment="PATH=/var/lib/hermes-fixture/.hermes/profiles/serie/node/bin:/var/lib/hermes-fixture/.hermes/profiles/serie/node:/usr/bin"
+"""
+        expected = installed.replace(
+            "/var/lib/hermes-fixture/.hermes/profiles/serie/node",
+            "/srv/hermes-lab-fixture/.hermes/profiles/serie/node",
+        )
+        unit_file = tmp_path / "hermes-gateway-serie.service"
+        unit_file.write_text(installed)
+        monkeypatch.setattr(gw, "get_systemd_unit_path", lambda system=False: unit_file)
+        monkeypatch.setattr(
+            gw,
+            "generate_systemd_unit",
+            lambda system=False, run_as_user=None: expected,
+        )
+
+        assert gw.systemd_unit_is_current(system=False) is True
+
+    def test_unit_with_duplicate_trailing_slash_path_is_current(self, tmp_path, monkeypatch):
+        from hermes_cli import gateway as gw
+
+        installed = """[Service]
+Environment="PATH=/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0/:/usr/bin"
+"""
+        expected = installed.replace(
+            ":/usr/bin",
+            ":/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0:/usr/bin",
+        )
+        unit_file = tmp_path / "hermes-gateway-serie.service"
+        unit_file.write_text(installed)
+        monkeypatch.setattr(gw, "get_systemd_unit_path", lambda system=False: unit_file)
+        monkeypatch.setattr(
+            gw,
+            "generate_systemd_unit",
+            lambda system=False, run_as_user=None: expected,
+        )
+
+        assert gw.systemd_unit_is_current(system=False) is True
 
     def test_nonexistent_unit_is_not_current(self, tmp_path, monkeypatch):
         from hermes_cli import gateway as gw

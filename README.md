@@ -1,3 +1,26 @@
+# Himmel
+
+**Himmel Hermes** is a public-preview downstream of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent), pinned to upstream `v2026.8.18` at commit `e624e9fde561e1add9388384012b295fde669ade`.
+
+- Full patched source is included; this is not a personal runtime export.
+- Credentials, profiles, sessions, messages, cron history, Kanban databases, and private patch bodies are excluded.
+- Upstream identity and downstream scope live under [`.himmel/`](.himmel/).
+- Release identity is recorded in [`HIMMEL_RELEASE.json`](HIMMEL_RELEASE.json).
+- Status: **public preview**. Focused downstream tests pass; known upstream/platform test failures remain documented in the release metadata.
+
+## Install from this source
+
+```bash
+git clone https://github.com/Bum-Boo/Himmel.git
+cd Himmel
+uv sync --locked --extra all
+.venv/bin/hermes --help
+```
+
+> Windows PowerShell uses `.venv\\Scripts\\hermes.exe`. Provider credentials are configured locally after installation and must never be committed.
+
+---
+
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import random
@@ -43,6 +44,31 @@ from hermes_cli.auth import (
 )
 
 logger = logging.getLogger(__name__)
+
+CodexUsageWindow = Tuple[float, Optional[float], Optional[float]]
+CodexUsageWindows = Dict[str, CodexUsageWindow]
+CODEX_INCLUDED_PLAN_HARD_LIMIT_PERCENT = 100.0
+CODEX_PRIMARY_WINDOW_MINUTES = 300.0
+CODEX_SECONDARY_WINDOW_MINUTES = 10080.0
+# The API may place either quota window in either JSON slot; classify by
+# duration so a weekly-only account does not fail as an unknown 5-hour window.
+CODEX_WINDOW_DURATION_TOLERANCE_MINUTES = 1.0
+CODEX_USAGE_CACHE_SECONDS = 60.0
+CODEX_USAGE_ERROR_CACHE_SECONDS = 5.0
+_CODEX_USAGE_CACHE: Dict[str, Tuple[float, Optional[CodexUsageWindows]]] = {}
+_CODEX_USAGE_CACHE_LOCK = threading.Lock()
+
+
+class CodexUsageGuardError(RuntimeError):
+    """Base error for fail-closed Codex included-plan protection."""
+
+
+class CodexUsageLimitReached(CodexUsageGuardError):
+    """Raised before inference when only additional paid credits remain."""
+
+
+class CodexUsageCheckUnavailable(CodexUsageGuardError):
+    """Raised when included-plan usage cannot be verified safely."""
 
 
 def _load_config_safe() -> Optional[dict]:
@@ -589,6 +615,164 @@ def credential_pool_matches_provider(
     return str(matched_pool or "").strip().lower() == pool_provider
 
 
+def _credential_usage_guard_rules(provider: str) -> List[Dict[str, Any]]:
+    """Return configured soft usage-cap rules for a credential pool."""
+    config = _load_config_safe() or {}
+    guards = config.get("credential_pool_usage_guards")
+    if not isinstance(guards, dict):
+        return []
+    raw_rules = guards.get(provider)
+    if isinstance(raw_rules, dict):
+        raw_rules = [raw_rules]
+    if not isinstance(raw_rules, list):
+        return []
+    return [rule for rule in raw_rules if isinstance(rule, dict)]
+
+
+def _find_codex_account_id(value: Any) -> Optional[str]:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key.lower() in {"account_id", "chatgpt_account_id"} and isinstance(item, str):
+                if item.strip():
+                    return item.strip()
+        for item in value.values():
+            found = _find_codex_account_id(item)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_codex_account_id(item)
+            if found:
+                return found
+    return None
+
+
+def _parse_codex_usage_window(value: Any) -> Optional[CodexUsageWindow]:
+    if not isinstance(value, dict):
+        return None
+    used = value.get("used_percent")
+    if not isinstance(used, (int, float)):
+        return None
+    window_minutes = value.get("window_minutes")
+    if not isinstance(window_minutes, (int, float)):
+        window_seconds = value.get("limit_window_seconds")
+        window_minutes = (
+            float(window_seconds) / 60.0
+            if isinstance(window_seconds, (int, float))
+            else None
+        )
+    reset_at = _parse_absolute_timestamp(value.get("reset_at"))
+    return (
+        float(used),
+        float(window_minutes) if window_minutes is not None else None,
+        reset_at,
+    )
+
+
+def _classify_codex_window_kind(window_minutes: Optional[float]) -> Optional[str]:
+    """Classify a raw quota window by duration, not by its JSON slot."""
+    if window_minutes is None:
+        return None
+    if abs(window_minutes - CODEX_PRIMARY_WINDOW_MINUTES) <= CODEX_WINDOW_DURATION_TOLERANCE_MINUTES:
+        return "primary"
+    if abs(window_minutes - CODEX_SECONDARY_WINDOW_MINUTES) <= CODEX_WINDOW_DURATION_TOLERANCE_MINUTES:
+        return "secondary"
+    return None
+
+
+def _fetch_codex_usage_windows(
+    entry: PooledCredential,
+    cache_seconds: float = CODEX_USAGE_CACHE_SECONDS,
+) -> Optional[CodexUsageWindows]:
+    """Fetch Codex 5-hour and weekly usage without persisting account data."""
+    token = str(entry.runtime_api_key or "").strip()
+    if not token:
+        return None
+    cache_key = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    now = time.time()
+    with _CODEX_USAGE_CACHE_LOCK:
+        cached = _CODEX_USAGE_CACHE.get(cache_key)
+        if cached:
+            cached_at, cached_windows = cached
+            effective_cache_seconds = max(0.0, cache_seconds)
+            if cached_windows is None:
+                effective_cache_seconds = min(
+                    effective_cache_seconds,
+                    CODEX_USAGE_ERROR_CACHE_SECONDS,
+                )
+            cache_fresh = now - cached_at < effective_cache_seconds
+            if cache_fresh and cached_windows:
+                cache_fresh = not any(
+                    reset_at is not None and reset_at <= now
+                    for _used, _minutes, reset_at in cached_windows.values()
+                )
+            if cache_fresh:
+                return cached_windows
+
+    import httpx
+
+    base_url = str(
+        entry.runtime_base_url or "https://chatgpt.com/backend-api/codex"
+    ).rstrip("/")
+    if base_url.endswith("/codex"):
+        usage_url = base_url[: -len("/codex")] + "/wham/usage"
+    elif "/backend-api" in base_url:
+        usage_url = base_url + "/wham/usage"
+    else:
+        usage_url = base_url + "/api/codex/usage"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "codex-cli",
+    }
+    account_id = _find_codex_account_id(_decode_jwt_claims(token))
+    if account_id:
+        headers["ChatGPT-Account-Id"] = account_id
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(usage_url, headers=headers)
+            response.raise_for_status()
+        payload = response.json() or {}
+    except Exception:
+        with _CODEX_USAGE_CACHE_LOCK:
+            _CODEX_USAGE_CACHE[cache_key] = (now, None)
+        raise
+
+    rate_limit = payload.get("rate_limit") or {}
+    result: CodexUsageWindows = {}
+    for raw_window in (rate_limit.get("primary_window"), rate_limit.get("secondary_window")):
+        parsed = _parse_codex_usage_window(raw_window)
+        if parsed is None:
+            continue
+        used_percent, window_minutes, _reset_at = parsed
+        kind = _classify_codex_window_kind(window_minutes)
+        if kind is None:
+            continue
+        existing = result.get(kind)
+        if existing is None or used_percent > existing[0]:
+            result[kind] = parsed
+    cached_result: Optional[CodexUsageWindows] = result or None
+    with _CODEX_USAGE_CACHE_LOCK:
+        _CODEX_USAGE_CACHE[cache_key] = (now, cached_result)
+    return cached_result
+
+
+def _fetch_codex_primary_usage(
+    entry: PooledCredential,
+    cache_seconds: float = CODEX_USAGE_CACHE_SECONDS,
+) -> Optional[CodexUsageWindow]:
+    windows = _fetch_codex_usage_windows(entry, cache_seconds=cache_seconds)
+    return windows.get("primary") if windows else None
+
+
+def _fetch_codex_secondary_usage(
+    entry: PooledCredential,
+    cache_seconds: float = CODEX_USAGE_CACHE_SECONDS,
+) -> Optional[CodexUsageWindow]:
+    windows = _fetch_codex_usage_windows(entry, cache_seconds=cache_seconds)
+    return windows.get("secondary") if windows else None
+
+
 DEFAULT_MAX_CONCURRENT_PER_CREDENTIAL = 1
 
 
@@ -675,6 +859,8 @@ class CredentialPool:
         # loop runs unbounded and non-interruptible.  Reset whenever a real
         # entry is identified or an escape path returns None.
         self._unmatched_rotation_streak: int = 0
+        self._last_usage_guard_blocked = 0
+        self._last_usage_guard_unavailable = 0
 
     def has_credentials(self) -> bool:
         with self._lock:
@@ -690,6 +876,187 @@ class CredentialPool:
         with self._lock:
             available, _pending = self._available_entries()
             return bool(available)
+
+    def usage_guard_enabled(self) -> bool:
+        return bool(_credential_usage_guard_rules(self.provider)) or any(
+            self._codex_included_plan_guard_applies(entry)
+            for entry in self._entries
+        )
+
+    def _codex_included_plan_guard_applies(self, entry: PooledCredential) -> bool:
+        """True for ChatGPT subscription OAuth entries that can spend credits."""
+        if self.provider != "openai-codex" or entry.auth_type != AUTH_TYPE_OAUTH:
+            return False
+        base_url = str(
+            entry.runtime_base_url or "https://chatgpt.com/backend-api/codex"
+        ).lower()
+        if not base_url.startswith("https://chatgpt.com/"):
+            return False
+        token = str(entry.runtime_api_key or "").strip()
+        if not token:
+            return False
+        return bool(_find_codex_account_id(_decode_jwt_claims(token)))
+
+    def _blocked_by_codex_included_plan_limit(
+        self, entry: PooledCredential
+    ) -> bool:
+        """Fail closed at either included-plan limit before paid credits run."""
+        if not self._codex_included_plan_guard_applies(entry):
+            return False
+        try:
+            windows = _fetch_codex_usage_windows(
+                entry, cache_seconds=CODEX_USAGE_CACHE_SECONDS
+            )
+        except Exception as exc:
+            raise CodexUsageCheckUnavailable(
+                "Codex included-plan usage could not be verified; request blocked "
+                "before inference to prevent additional credit usage."
+            ) from exc
+        if not windows:
+            raise CodexUsageCheckUnavailable(
+                "Codex included-plan usage response had no recognized 5-hour or "
+                "weekly window; request blocked before inference to prevent "
+                "additional credit usage."
+            )
+
+        for name, usage in windows.items():
+            used_percent, _window_minutes, reset_at = usage
+            if used_percent >= CODEX_INCLUDED_PLAN_HARD_LIMIT_PERCENT:
+                reset_hint = (
+                    f" until {datetime.fromtimestamp(reset_at, timezone.utc).isoformat()}"
+                    if reset_at
+                    else ""
+                )
+                logger.warning(
+                    "credential pool: blocking %s before inference; Codex %s "
+                    "included-plan usage at %.1f%%%s (additional-credit protection)",
+                    entry.label or entry.id[:8],
+                    name,
+                    used_percent,
+                    reset_hint,
+                )
+                return True
+        return False
+
+    def _blocked_by_usage_guard(self, entry: PooledCredential) -> bool:
+        """Apply optional per-credential soft thresholds from config."""
+        if self.provider != "openai-codex":
+            return False
+        for rule in _credential_usage_guard_rules(self.provider):
+            label = str(rule.get("label") or "").strip()
+            credential_id = str(rule.get("id") or "").strip()
+            if label and entry.label != label:
+                continue
+            if credential_id and entry.id != credential_id:
+                continue
+            if not label and not credential_id:
+                continue
+            threshold_raw = rule.get("primary_used_percent")
+            if threshold_raw is None:
+                continue
+            try:
+                threshold = float(threshold_raw)
+            except (TypeError, ValueError):
+                continue
+            if not 0 <= threshold <= 100:
+                continue
+            try:
+                cache_seconds = float(rule.get("cache_seconds", CODEX_USAGE_CACHE_SECONDS))
+            except (TypeError, ValueError):
+                cache_seconds = CODEX_USAGE_CACHE_SECONDS
+            try:
+                usage = _fetch_codex_primary_usage(entry, cache_seconds=cache_seconds)
+            except Exception as exc:
+                logger.warning(
+                    "credential pool: Codex soft usage guard check failed for %s; "
+                    "allowing credential: %s",
+                    entry.label or entry.id[:8],
+                    exc,
+                )
+                return False
+            if usage is None:
+                return False
+            used_percent, window_minutes, reset_at = usage
+            expected_window = rule.get(
+                "primary_window_minutes", rule.get("window_minutes")
+            )
+            if expected_window is not None:
+                try:
+                    expected_window = float(expected_window)
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    window_minutes is None
+                    or abs(window_minutes - expected_window) > 0.01
+                ):
+                    continue
+            if used_percent >= threshold:
+                reset_hint = (
+                    f" until {datetime.fromtimestamp(reset_at, timezone.utc).isoformat()}"
+                    if reset_at
+                    else ""
+                )
+                logger.info(
+                    "credential pool: usage guard skipping %s; primary at %.1f%% "
+                    "(threshold %.1f%%)%s",
+                    entry.label or entry.id[:8],
+                    used_percent,
+                    threshold,
+                    reset_hint,
+                )
+                return True
+
+            secondary_threshold_raw = rule.get("secondary_used_percent")
+            if secondary_threshold_raw is None:
+                continue
+            try:
+                secondary_threshold = float(secondary_threshold_raw)
+            except (TypeError, ValueError):
+                continue
+            if not 0 <= secondary_threshold <= 100:
+                continue
+            try:
+                secondary_usage = _fetch_codex_secondary_usage(
+                    entry, cache_seconds=cache_seconds
+                )
+            except Exception as exc:
+                logger.warning(
+                    "credential pool: Codex weekly soft guard check failed for %s; "
+                    "allowing credential: %s",
+                    entry.label or entry.id[:8],
+                    exc,
+                )
+                return False
+            if secondary_usage is None:
+                continue
+            secondary_used, secondary_window, secondary_reset_at = secondary_usage
+            expected_secondary_window = rule.get("secondary_window_minutes")
+            if expected_secondary_window is not None:
+                try:
+                    expected_secondary_window = float(expected_secondary_window)
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    secondary_window is None
+                    or abs(secondary_window - expected_secondary_window) > 0.01
+                ):
+                    continue
+            if secondary_used >= secondary_threshold:
+                reset_hint = (
+                    f" until {datetime.fromtimestamp(secondary_reset_at, timezone.utc).isoformat()}"
+                    if secondary_reset_at
+                    else ""
+                )
+                logger.info(
+                    "credential pool: usage guard skipping %s; weekly at %.1f%% "
+                    "(threshold %.1f%%)%s",
+                    entry.label or entry.id[:8],
+                    secondary_used,
+                    secondary_threshold,
+                    reset_hint,
+                )
+                return True
+        return False
 
     def next_available_at(self) -> Optional[float]:
         """Earliest epoch time (seconds) any entry re-enters rotation.
@@ -1842,6 +2209,8 @@ class CredentialPool:
         # that can block for 20+ seconds.  We collect them under self._lock
         # and refresh outside the lock to avoid stalling all pool consumers.
         pending_refresh: List[tuple] = []  # (entry, sync_entry_fn)
+        usage_guard_blocked = 0
+        usage_guard_unavailable = 0
         # DEAD entries never re-enter rotation, so if at most one non-DEAD entry
         # exists there is nothing to rotate to: an exhausted sole credential
         # should cool down briefly rather than bench the only key for an hour.
@@ -1897,6 +2266,23 @@ class CredentialPool:
                 if synced is not entry:
                     entry = synced
                     cleared_any = True
+            # ChatGPT OAuth may continue on purchased credits after either
+            # included-plan quota reaches 100%. Enforce the provider usage
+            # endpoint before any stale local cooldown can be bypassed.
+            if self._codex_included_plan_guard_applies(entry):
+                if refresh and self._entry_needs_refresh(entry):
+                    pending_refresh.append(
+                        (entry, self._sync_codex_entry_from_auth_store)
+                    )
+                    continue
+                try:
+                    hard_blocked = self._blocked_by_codex_included_plan_limit(entry)
+                except CodexUsageCheckUnavailable:
+                    usage_guard_unavailable += 1
+                    continue
+                if hard_blocked:
+                    usage_guard_blocked += 1
+                    continue
             if entry.last_status == STATUS_DEAD:
                 # Manual DEAD credentials get pruned after a 24h quiet window
                 # so the pool doesn't accumulate dead entries forever.  The
@@ -1970,12 +2356,17 @@ class CredentialPool:
                 if refreshed is None:
                     continue
                 entry = refreshed
+            if self._blocked_by_usage_guard(entry):
+                usage_guard_blocked += 1
+                continue
             available.append(entry)
         if entries_to_prune:
             pruned_ids = set(entries_to_prune)
             self._entries = [e for e in self._entries if e.id not in pruned_ids]
         if cleared_any:
             self._persist(removed_ids=entries_to_prune)
+        self._last_usage_guard_blocked = usage_guard_blocked
+        self._last_usage_guard_unavailable = usage_guard_unavailable
         return available, pending_refresh
 
     def _log_no_available_entries(self) -> None:
@@ -2001,6 +2392,17 @@ class CredentialPool:
         available, pending_refresh = self._available_entries(clear_expired=True, refresh=refresh)
         if not available:
             self._current_id = None
+            if self._last_usage_guard_blocked:
+                raise CodexUsageLimitReached(
+                    "Codex included-plan limit reached; request blocked before "
+                    "inference to prevent additional credit usage."
+                )
+            if self._last_usage_guard_unavailable:
+                raise CodexUsageCheckUnavailable(
+                    "No Codex credential had verifiable included-plan usage; "
+                    "request blocked before inference to prevent additional "
+                    "credit usage."
+                )
             self._log_no_available_entries()
             return None, pending_refresh
 

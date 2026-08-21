@@ -719,7 +719,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             if not isinstance(_top_tg_extra, dict):
                 _top_tg_extra = {}
             _tg_extra = {**_gw_tg_extra, **_top_tg_extra}
-            if _tg_extra.get("rich_messages"):
+            _rich_messages = _tg_extra.get("rich_messages")
+            if isinstance(_rich_messages, dict):
+                _rich_messages = _rich_messages.get("enabled", False)
+            if is_truthy_value(_rich_messages):
                 _default_hint = _default_hint.rstrip() + " " + TELEGRAM_RICH_MESSAGES_HINT
         except Exception:
             pass  # Config read failure — fall back to base hint only

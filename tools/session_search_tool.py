@@ -35,6 +35,7 @@ support.
 
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional, Union
 
 from hermes_state_common import _RESET_END_REASONS
@@ -1116,6 +1117,185 @@ def session_search(
                 logging.debug("Failed to close session_search SessionDB", exc_info=True)
 
 
+_CURRENT_CHAT_DEFAULT_ROLES = ("user", "assistant")
+_CURRENT_CHAT_ALLOWED_ROLES = {"system", "user", "assistant", "tool"}
+_CURRENT_CHAT_MAX_COUNT = 50
+_CURRENT_CHAT_MAX_CHARS_PER_MESSAGE = 2000
+
+
+def _current_chat_content_to_text(content: Any) -> str:
+    """Return a compact text representation for stored message content."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+                elif item.get("type"):
+                    parts.append(f"[{item.get('type')}]")
+            elif isinstance(item, str):
+                parts.append(item)
+        if parts:
+            return "\n".join(parts)
+    try:
+        return json.dumps(content, ensure_ascii=False)
+    except Exception:
+        return str(content)
+
+
+def _redact_current_chat_text(text: str) -> str:
+    """Redact secrets at the current-chat context safety boundary."""
+    if not text:
+        return ""
+    try:
+        from agent.redact import redact_sensitive_text
+
+        return redact_sensitive_text(text, force=True)
+    except Exception:
+        text = re.sub(r"\bgh[pousr]_[A-Za-z0-9_.-]{8,}\b", "[REDACTED]", text)
+        text = re.sub(
+            r"(?i)\b(api[_-]?key|token|password|secret|authorization)\b\s*[:=]\s*[^\s,;]+",
+            r"\1=[REDACTED]",
+            text,
+        )
+        return re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/-]{10,}", "Bearer [REDACTED]", text)
+
+
+def _shape_current_chat_message(message: Dict[str, Any], max_chars: int) -> Dict[str, Any]:
+    text = _redact_current_chat_text(_current_chat_content_to_text(message.get("content")))
+    if len(text) > max_chars:
+        text = text[: max(0, max_chars - 15)].rstrip() + " ...[truncated]"
+    shaped: Dict[str, Any] = {
+        "id": message.get("id"),
+        "role": message.get("role"),
+        "content": text,
+        "timestamp": message.get("timestamp"),
+    }
+    if message.get("platform_message_id"):
+        shaped["platform_message_id"] = str(message.get("platform_message_id"))
+    if message.get("tool_name"):
+        shaped["tool_name"] = message.get("tool_name")
+    return {key: value for key, value in shaped.items() if value is not None or key == "content"}
+
+
+def current_chat_context(
+    count: int = 12,
+    max_chars_per_message: int = 500,
+    role_filter: Optional[Union[str, List[str]]] = None,
+    reply_to_message_id: Optional[str] = None,
+    db=None,
+    current_session_id: str = None,
+) -> str:
+    """Return bounded, redacted messages from the current gateway session only."""
+    session_id = str(current_session_id or "").strip()
+    if not session_id:
+        try:
+            from gateway.session_context import get_session_env
+
+            session_id = str(get_session_env("HERMES_SESSION_ID", "") or "").strip()
+        except Exception:
+            session_id = ""
+    if not session_id:
+        return json.dumps({
+            "success": False,
+            "status": "current_session_unavailable",
+            "scope": "current_session_only",
+            "message": "current_chat_context requires an active Hermes session context",
+        }, ensure_ascii=False)
+
+    owned_db = False
+    if db is None:
+        try:
+            from hermes_state import SessionDB
+
+            db = SessionDB()
+            owned_db = True
+        except Exception:
+            logging.debug("SessionDB unavailable for current_chat_context", exc_info=True)
+            return json.dumps({
+                "success": False,
+                "status": "session_db_unavailable",
+                "scope": "current_session_only",
+                "message": "SessionDB unavailable for current_chat_context",
+            }, ensure_ascii=False)
+
+    try:
+        try:
+            count = max(1, min(int(count), _CURRENT_CHAT_MAX_COUNT))
+        except (TypeError, ValueError):
+            count = 12
+        try:
+            max_chars_per_message = max(
+                80, min(int(max_chars_per_message), _CURRENT_CHAT_MAX_CHARS_PER_MESSAGE)
+            )
+        except (TypeError, ValueError):
+            max_chars_per_message = 500
+
+        if isinstance(role_filter, str) and role_filter.strip():
+            raw_roles = [role.strip() for role in role_filter.split(",")]
+        elif isinstance(role_filter, list):
+            raw_roles = [str(role).strip() for role in role_filter]
+        else:
+            raw_roles = list(_CURRENT_CHAT_DEFAULT_ROLES)
+        roles = [role for role in raw_roles if role in _CURRENT_CHAT_ALLOWED_ROLES]
+        roles = roles or list(_CURRENT_CHAT_DEFAULT_ROLES)
+
+        if not db.get_session(session_id):
+            return json.dumps({
+                "success": False,
+                "status": "current_session_not_found",
+                "scope": "current_session_only",
+                "session_id": session_id,
+            }, ensure_ascii=False)
+        all_messages = db.get_messages(session_id)
+        selected = [message for message in all_messages if message.get("role") in roles][-count:]
+        payload: Dict[str, Any] = {
+            "success": True,
+            "status": "ok",
+            "scope": "current_session_only",
+            "session_id": session_id,
+            "roles": roles,
+            "count": len(selected),
+            "messages": [
+                _shape_current_chat_message(message, max_chars_per_message)
+                for message in selected
+            ],
+        }
+        if reply_to_message_id is not None and str(reply_to_message_id).strip():
+            wanted = str(reply_to_message_id).strip()
+            target = next(
+                (message for message in all_messages
+                 if str(message.get("platform_message_id") or "") == wanted),
+                None,
+            )
+            payload["reply_target"] = (
+                _shape_current_chat_message(target, max_chars_per_message)
+                if target is not None
+                else {"status": "unavailable", "reply_to_message_id": wanted}
+            )
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception as exc:
+        logging.debug("Failed to load current session messages", exc_info=True)
+        return json.dumps({
+            "success": False,
+            "status": "messages_unavailable",
+            "scope": "current_session_only",
+            "session_id": session_id,
+            "message": str(exc),
+        }, ensure_ascii=False)
+    finally:
+        if owned_db:
+            try:
+                db.close()
+            except Exception:
+                logging.debug("Failed to close current_chat_context SessionDB", exc_info=True)
+
+
 def check_session_search_requirements() -> bool:
     """Requires the SQLite state database."""
     try:
@@ -1296,8 +1476,43 @@ SESSION_SEARCH_SCHEMA = {
 }
 
 
+CURRENT_CHAT_CONTEXT_SCHEMA = {
+    "name": "current_chat_context",
+    "description": (
+        "Read a bounded, redacted slice of the current Hermes gateway session only. "
+        "Pass reply_to_message_id to resolve a reply anchor inside that transcript."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "count": {"type": "integer", "default": 12},
+            "max_chars_per_message": {"type": "integer", "default": 500},
+            "role_filter": {"type": "string"},
+            "reply_to_message_id": {"type": "string"},
+        },
+        "required": [],
+    },
+}
+
+
 # --- Registry ---
 from tools.registry import registry, tool_error
+
+registry.register(
+    name="current_chat_context",
+    toolset="session_search",
+    schema=CURRENT_CHAT_CONTEXT_SCHEMA,
+    handler=lambda args, **kw: current_chat_context(
+        count=args.get("count", 12),
+        max_chars_per_message=args.get("max_chars_per_message", 500),
+        role_filter=args.get("role_filter"),
+        reply_to_message_id=args.get("reply_to_message_id"),
+        db=kw.get("db"),
+        current_session_id=kw.get("current_session_id"),
+    ),
+    check_fn=check_session_search_requirements,
+    emoji="💬",
+)
 
 registry.register(
     name="session_search",

@@ -16,12 +16,14 @@ import pytest
 
 from hermes_state import SessionDB
 from tools.session_search_tool import (
+    CURRENT_CHAT_CONTEXT_SCHEMA,
     SESSION_SEARCH_SCHEMA,
     _format_timestamp,
     _is_compacted_message,
     _is_compression_ended,
     _resolve_to_parent,
     _session_link,
+    current_chat_context,
     session_search,
 )
 
@@ -100,6 +102,41 @@ class TestSchema:
             "profile",
         ]
         assert parameters == [*historical_prefix, "detail"]
+
+
+class TestCurrentChatContext:
+    def test_schema_is_bounded_and_toolset_exposes_it(self):
+        from toolsets import TOOLSETS, _HERMES_CORE_TOOLS
+
+        params = CURRENT_CHAT_CONTEXT_SCHEMA["parameters"]["properties"]
+        assert {"count", "max_chars_per_message", "reply_to_message_id"} <= params.keys()
+        assert "current_chat_context" in _HERMES_CORE_TOOLS
+        assert "current_chat_context" in TOOLSETS["session_search"]["tools"]
+
+    def test_returns_only_current_session_and_resolves_reply_target(self, db):
+        db.create_session("current", source="telegram")
+        db.create_session("other", source="telegram")
+        db.append_message("other", role="assistant", content="must not leak")
+        row_id = db.append_message(
+            "current",
+            role="assistant",
+            content="answer being replied to",
+            platform_message_id="tg-42",
+        )
+        db.append_message("current", role="user", content="follow up")
+        db._conn.commit()
+
+        result = json.loads(current_chat_context(
+            db=db,
+            current_session_id="current",
+            reply_to_message_id="tg-42",
+        ))
+
+        assert result["success"] is True
+        assert result["scope"] == "current_session_only"
+        assert result["reply_target"]["id"] == row_id
+        assert result["reply_target"]["content"] == "answer being replied to"
+        assert "must not leak" not in json.dumps(result, ensure_ascii=False)
 
 
 class TestFormatTimestamp:

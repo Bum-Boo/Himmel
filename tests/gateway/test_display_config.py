@@ -89,6 +89,19 @@ class TestYAMLNormalisation:
         config = {"display": {"tool_progress": False}}
         assert resolve_display_setting(config, "telegram", "tool_progress") == "off"
 
+    def test_tool_progress_persona_is_preserved(self):
+        """The safe persona renderer must remain selected after resolution."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {
+            "display": {
+                "platforms": {
+                    "telegram": {"tool_progress": "persona"},
+                }
+            }
+        }
+        assert resolve_display_setting(config, "telegram", "tool_progress") == "persona"
+
 
     def test_only_long_running_visibility_accepts_generic_mode(self):
         from gateway.display_config import resolve_display_setting
@@ -300,5 +313,4 @@ class TestLiveStatusSetting:
         from gateway.display_config import resolve_display_setting
 
         assert resolve_display_setting({}, "slack", "live_status") == "full"
-
 

@@ -4147,6 +4147,55 @@ class TurnRunner:
         self._runner = runner
         self._ctx = ctx
 
+    def _queue_persona_progress(self, tool_name: str | None = None) -> bool:
+        """Queue one safe in-character line without tool names or arguments."""
+        ctx = self._ctx
+        if not ctx.progress_queue or ctx.progress_mode != "persona":
+            return False
+        try:
+            persona_max = ctx.resolve_display_setting(
+                ctx.user_config,
+                ctx.platform_key,
+                "persona_progress_max_per_turn",
+                1,
+            )
+            if ctx.persona_progress_count[0] >= int(persona_max):
+                return False
+            from gateway.display_config import (
+                build_persona_progress_message,
+                resolve_persona_progress_media,
+            )
+
+            msg = build_persona_progress_message(
+                ctx.user_config,
+                ctx.platform_key,
+                sequence=ctx.persona_progress_count[0],
+                tool_name=tool_name,
+            )
+            media = resolve_persona_progress_media(
+                ctx.user_config,
+                ctx.platform_key,
+                msg,
+            )
+            ctx.persona_progress_count[0] += 1
+        except Exception:
+            msg = "확인하는 중이야."
+            media = None
+        if msg == ctx.last_progress_msg[0]:
+            return False
+        ctx.last_progress_msg[0] = msg
+        single_persona = bool(ctx.resolve_display_setting(
+            ctx.user_config,
+            ctx.platform_key,
+            "persona_progress_single_message",
+            True,
+        ))
+        if media:
+            ctx.progress_queue.put(("__progress_media__", msg, media, single_persona))
+        else:
+            ctx.progress_queue.put(("__replace__", msg) if single_persona else msg)
+        return True
+
     def progress_callback(self, event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
         """Callback invoked by agent on tool lifecycle events."""
         ctx = self._ctx
@@ -4277,6 +4326,12 @@ class TurnRunner:
                 return
         except Exception:
             pass
+
+        # Persona mode never renders the tool name, preview, arguments, path,
+        # URL, or command. It emits only configured fixed copy.
+        if ctx.progress_mode == "persona":
+            self._queue_persona_progress(tool_name)
+            return
 
         # "new" mode: only report when tool changes
         if ctx.progress_mode == "new" and tool_name == ctx.last_tool[0]:
@@ -4727,6 +4782,30 @@ class TurnRunner:
             _track_progress_result(result)
             return result
 
+        async def _send_progress_media(media: dict | None, *, fallback_caption: str | None = None):
+            if not isinstance(media, dict):
+                return None
+            raw_path = str(media.get("path") or "").strip()
+            if not raw_path:
+                return None
+            safe_path = BasePlatformAdapter.validate_media_delivery_path(raw_path)
+            if not safe_path:
+                logger.warning("Skipping persona progress media with unsafe or missing path")
+                return None
+            if type(adapter).send_image_file is BasePlatformAdapter.send_image_file:
+                logger.warning("Skipping persona progress media: adapter has no native image send")
+                return None
+            caption = media.get("caption")
+            result = await adapter.send_image_file(
+                chat_id=ctx.source.chat_id,
+                image_path=safe_path,
+                caption=caption if isinstance(caption, str) else fallback_caption,
+                reply_to=ctx._progress_reply_to,
+                metadata=ctx._progress_metadata,
+            )
+            _track_progress_result(result)
+            return result
+
         async def _roll_progress_overflow_if_needed() -> bool:
             """Start fresh editable progress bubbles before a bubble exceeds limit.
 
@@ -4799,12 +4878,22 @@ class TurnRunner:
                 except Exception:
                     pass
 
-                # Handle dedup messages: update last line with repeat counter
+                # Handle dedup and persona replacement/media messages.
+                progress_media = None
                 if isinstance(raw, tuple) and len(raw) == 3 and raw[0] == "__dedup__":
                     _, base_msg, count = raw
                     if progress_lines:
                         progress_lines[-1] = f"{base_msg} (×{count + 1})"
                     msg = progress_lines[-1] if progress_lines else base_msg
+                elif isinstance(raw, tuple) and len(raw) == 4 and raw[0] == "__progress_media__":
+                    _, msg, progress_media, replace_progress = raw
+                    if replace_progress:
+                        progress_lines = [msg]
+                    else:
+                        progress_lines.append(msg)
+                elif isinstance(raw, tuple) and len(raw) == 2 and raw[0] == "__replace__":
+                    _, msg = raw
+                    progress_lines = [msg]
                 elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
                     # Content bubble just landed on the platform — close off
                     # the current tool-progress bubble so the next tool
@@ -4836,7 +4925,7 @@ class TurnRunner:
                 # instead of reacting to 429s.)
                 _now = time.monotonic()
                 _remaining = _PROGRESS_EDIT_INTERVAL - (_now - _last_edit_ts)
-                if _remaining > 0:
+                if _remaining > 0 and progress_media is None:
                     # Wait out the throttle interval, then loop back to
                     # drain any additional queued messages before sending
                     # a single batched edit.
@@ -4845,6 +4934,27 @@ class TurnRunner:
 
                 if not ctx._run_still_current():
                     return
+
+                # Persona media is the progress bubble itself.  Sending the
+                # text first and the image second defeats single-message mode
+                # and produces two Telegram bubbles for one progress event.
+                # Put the persona text in the image caption instead; fall back
+                # to one text bubble only when native media delivery fails.
+                if progress_media is not None:
+                    result = await _send_progress_media(
+                        progress_media,
+                        fallback_caption=msg,
+                    )
+                    if not result or not result.success:
+                        await _send_progress_text(msg)
+                    _last_edit_ts = time.monotonic()
+                    await asyncio.sleep(0.3)
+                    if ctx._run_still_current():
+                        await adapter.send_typing(
+                            ctx.source.chat_id,
+                            metadata=ctx._progress_metadata,
+                        )
+                    continue
 
                 if can_edit and progress_msg_id is not None:
                     # Try to edit the existing progress message
@@ -4927,6 +5037,21 @@ class TurnRunner:
                             if progress_lines:
                                 progress_lines[-1] = f"{base_msg} (×{count + 1})"
                                 await _roll_progress_overflow_if_needed()
+                        elif isinstance(raw, tuple) and len(raw) == 4 and raw[0] == "__progress_media__":
+                            _, msg, progress_media, replace_progress = raw
+                            if replace_progress:
+                                progress_lines = [msg]
+                            else:
+                                progress_lines.append(msg)
+                            await _roll_progress_overflow_if_needed()
+                            await _send_progress_media(
+                                progress_media,
+                                fallback_caption=msg,
+                            )
+                        elif isinstance(raw, tuple) and len(raw) == 2 and raw[0] == "__replace__":
+                            _, msg = raw
+                            progress_lines = [msg]
+                            await _roll_progress_overflow_if_needed()
                         elif isinstance(raw, tuple) and len(raw) >= 1 and raw[0] == "__reset__":
                             # Content-bubble marker during drain: close off
                             # the current progress bubble and start a fresh
@@ -5970,6 +6095,8 @@ class TurnRunner:
 
             cmd = approval_data.get("command", "")
             desc = approval_data.get("description", "dangerous command")
+            purpose = approval_data.get("purpose", "")
+            approval_kind = approval_data.get("approval_kind", "terminal")
 
             # Redact credentials from the command before displaying it in
             # the approval prompt — Tirith's findings are already redacted,
@@ -5984,6 +6111,16 @@ class TurnRunner:
             # false positives from MagicMock auto-attribute creation in tests.
             if getattr(type(ctx._status_adapter), "send_exec_approval", None) is not None:
                 try:
+                    _approval_send_kwargs = {}
+                    _approval_method_params = inspect.signature(
+                        getattr(type(ctx._status_adapter), "send_exec_approval")
+                    ).parameters
+                    for _name, _value in (
+                        ("purpose", purpose),
+                        ("approval_kind", approval_kind),
+                    ):
+                        if _name in _approval_method_params:
+                            _approval_send_kwargs[_name] = _value
                     _approval_fut = safe_schedule_threadsafe(
                         ctx._status_adapter.send_exec_approval(
                             chat_id=ctx._status_chat_id,
@@ -5994,6 +6131,7 @@ class TurnRunner:
                             allow_permanent=approval_data.get("allow_permanent", True),
                             allow_session=approval_data.get("allow_session", True),
                             smart_denied=approval_data.get("smart_denied", False),
+                            **_approval_send_kwargs,
                         ),
                         ctx._loop_for_step,
                         logger=logger,
@@ -18118,21 +18256,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     f"{message_text}"
                 )
 
-        if getattr(event, "reply_to_text", None) and event.reply_to_message_id:
+        if event.reply_to_message_id:
             # Always inject the reply-to pointer — even when the quoted text
-            # already appears in history. The prefix isn't deduplication, it's
-            # disambiguation: it tells the agent *which* prior message the user
-            # is referencing. History can contain the same or similar text
-            # multiple times, and without an explicit pointer the agent has to
-            # guess (or answer for both subjects). Token overhead is minimal.
-            reply_snippet = event.reply_to_text[:500]
-            if getattr(event, "reply_to_is_own_message", False):
-                message_text = (
-                    f'[Replying to your previous message: "{reply_snippet}"]\n\n'
-                    f"{message_text}"
-                )
+            # already appears in history. Include the platform message id so a
+            # missing quote can be resolved with current_chat_context.
+            if getattr(event, "reply_to_text", None):
+                reply_snippet = event.reply_to_text[:500]
+                if getattr(event, "reply_to_is_own_message", False):
+                    message_text = (
+                        f'[Replying to your previous message id {event.reply_to_message_id}: "{reply_snippet}"]\n\n'
+                        f"{message_text}"
+                    )
+                else:
+                    message_text = (
+                        f'[Replying to message id {event.reply_to_message_id}: "{reply_snippet}"]\n\n'
+                        f"{message_text}"
+                    )
             else:
-                message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
+                message_text = (
+                    f"[Replying to message id {event.reply_to_message_id}; "
+                    "reply target text unavailable. Use current_chat_context "
+                    "with reply_to_message_id if needed.]"
+                    f"\n\n{message_text}"
+                )
 
         if "@" in message_text:
             try:
@@ -25740,7 +25886,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         "honcho.runtime_peer_prefix",
         "honcho.user_peer_aliases",
     )
-    _HONCHO_CACHE_BUSTING_MEMO: dict[tuple[str, int | None], dict[str, Any]] = {}
 
     @classmethod
     def _empty_honcho_cache_busting_config(cls) -> dict[str, Any]:
@@ -25748,31 +25893,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     @classmethod
     def _extract_honcho_cache_busting_config(cls) -> dict[str, Any]:
-        """Extract Honcho identity keys, memoized by honcho.json mtime."""
+        """Extract Honcho identity keys from a fresh honcho.json read."""
         try:
             from plugins.memory.honcho.client import HonchoClientConfig, resolve_config_path
 
             path = resolve_config_path()
-            try:
-                mtime_ns = path.stat().st_mtime_ns
-            except OSError:
-                mtime_ns = None
-            memo_key = (str(path), mtime_ns)
-            cached = cls._HONCHO_CACHE_BUSTING_MEMO.get(memo_key)
-            if cached is not None:
-                return dict(cached)
-
             hcfg = HonchoClientConfig.from_global_config(config_path=path)
             aliases = hcfg.user_peer_aliases or {}
-            values = {
+            return {
                 "honcho.peer_name": hcfg.peer_name,
                 "honcho.ai_peer": hcfg.ai_peer,
                 "honcho.pin_peer_name": bool(hcfg.pin_peer_name),
                 "honcho.runtime_peer_prefix": hcfg.runtime_peer_prefix or "",
                 "honcho.user_peer_aliases": sorted(aliases.items()) if isinstance(aliases, dict) else [],
             }
-            cls._HONCHO_CACHE_BUSTING_MEMO = {memo_key: values}
-            return dict(values)
         except Exception:
             return cls._empty_honcho_cache_busting_config()
 
@@ -27966,6 +28100,58 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             _cleanup_progress = False
             _cleanup_adapter = None
         _cleanup_msg_ids: List[str] = []
+
+        def _register_progress_cleanup(delivery_response: dict | None) -> None:
+            """Delete this logical turn's progress after its reply is delivered.
+
+            Queued follow-ups deliver an intermediate reply and recurse before
+            reaching the normal function epilogue. Registering through one
+            helper lets that branch release its own temporary bubbles before
+            the next logical turn starts instead of leaking them into history.
+            """
+            if not (
+                _cleanup_progress
+                and _cleanup_adapter is not None
+                and _cleanup_msg_ids
+                and session_key
+                and isinstance(delivery_response, dict)
+                and not delivery_response.get("failed")
+                and hasattr(_cleanup_adapter, "register_post_delivery_callback")
+            ):
+                return
+
+            _ids_snapshot = list(_cleanup_msg_ids)
+            _chat_id_snapshot = source.chat_id
+            _adapter_snapshot = _cleanup_adapter
+            _loop_snapshot = asyncio.get_running_loop()
+
+            def _cleanup_temp_bubbles() -> None:
+                async def _delete_all() -> None:
+                    for _mid in _ids_snapshot:
+                        try:
+                            await _adapter_snapshot.delete_message(
+                                _chat_id_snapshot, _mid
+                            )
+                        except Exception:
+                            pass
+                try:
+                    safe_schedule_threadsafe(
+                        _delete_all(), _loop_snapshot,
+                        logger=logger,
+                        log_message="Temp bubble cleanup scheduling error",
+                    )
+                except Exception:
+                    pass
+
+            try:
+                _cleanup_adapter.register_post_delivery_callback(
+                    session_key,
+                    _cleanup_temp_bubbles,
+                    generation=run_generation,
+                )
+            except Exception as _rpe:
+                logger.debug("Post-delivery cleanup registration failed: %s", _rpe)
+
         # First-touch onboarding latch: fires at most once per run, even if
         # several tools exceed the threshold.
         long_tool_hint_fired = [False]
@@ -27973,6 +28159,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         turn_ctx = TurnContext(
             source=source,
+            platform_key=platform_key,
             _run_still_current=_run_still_current,
             _live_status_adapter=_live_status_adapter,
             _live_status_mode=_live_status_mode,
@@ -28306,6 +28493,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # no task ever drained — so they silently never appeared.
         progress_task = None
         if needs_progress_queue:
+            if progress_mode == "persona" and bool(resolve_display_setting(
+                user_config,
+                platform_key,
+                "persona_progress_on_start",
+                True,
+            )):
+                turn_runner._queue_persona_progress("turn_start")
             progress_task = asyncio.create_task(send_progress_messages())
 
         # Start the tool-call log writer when tool_progress == "log".
@@ -28454,6 +28648,44 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # interval. Falls back to send-new when edit fails or isn't
             # supported by the adapter.
             _heartbeat_msg_id: Optional[str] = None
+            _heartbeat_media_attempted_keys: set[tuple[str, str]] = set()
+
+            async def _send_heartbeat_media(media: dict | None):
+                if not isinstance(media, dict):
+                    return None
+                raw_path = str(media.get("path") or "").strip()
+                if not raw_path:
+                    return None
+                safe_path = BasePlatformAdapter.validate_media_delivery_path(raw_path)
+                if not safe_path:
+                    logger.warning("Skipping long-running heartbeat media with unsafe or missing path")
+                    return None
+                if type(_notify_adapter).send_image_file is BasePlatformAdapter.send_image_file:
+                    logger.warning("Skipping long-running heartbeat media: adapter has no native image send")
+                    return None
+                caption = media.get("caption")
+                safe_caption = caption.strip() if isinstance(caption, str) and caption.strip() else ""
+                media_key = (safe_path, safe_caption)
+                if media_key in _heartbeat_media_attempted_keys:
+                    return None
+                _heartbeat_media_attempted_keys.add(media_key)
+                result = await _notify_adapter.send_image_file(
+                    chat_id=source.chat_id,
+                    image_path=safe_path,
+                    caption=safe_caption or None,
+                    metadata=_non_conversational_metadata(
+                        _status_thread_metadata,
+                        platform=source.platform,
+                    ),
+                )
+                if (
+                    _cleanup_progress
+                    and getattr(result, "success", False)
+                    and getattr(result, "message_id", None)
+                ):
+                    _cleanup_msg_ids.append(str(result.message_id))
+                return result
+
             while True:
                 await asyncio.sleep(_NOTIFY_INTERVAL)
                 # Stop heartbeating once this run no longer owns the session
@@ -28500,10 +28732,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _status_detail = " — " + ", ".join(_parts)
                     except Exception:
                         pass
+                from gateway.display_config import (
+                    build_long_running_heartbeat_text,
+                    resolve_long_running_heartbeat_media,
+                )
                 _heartbeat_text = (
                     _generic_status_phrase("status")
                     if _long_running_mode == "generic"
-                    else f"⏳ Working — {_elapsed_mins} min{_status_detail}"
+                    else build_long_running_heartbeat_text(
+                        user_config,
+                        platform_key,
+                        elapsed_minutes=_elapsed_mins,
+                        status_detail=_status_detail,
+                    )
+                )
+                _heartbeat_media = resolve_long_running_heartbeat_media(
+                    user_config,
+                    platform_key,
+                    _heartbeat_text,
                 )
                 try:
                     _notify_res = None
@@ -28529,6 +28775,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             _heartbeat_msg_id = str(_notify_res.message_id)
                             if _cleanup_progress:
                                 _cleanup_msg_ids.append(_heartbeat_msg_id)
+                    if _heartbeat_media is not None:
+                        await _send_heartbeat_media(_heartbeat_media)
                 except Exception as _ne:
                     logger.debug("Long-running notification error: %s", _ne)
 
@@ -29123,6 +29371,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # first response has been delivered.  Pop from the
                     # adapter's callback dict (prevents double-fire in
                     # base.py's finally block) and call it.
+                    _register_progress_cleanup(_delivery_result)
                     if getattr(type(adapter), "pop_post_delivery_callback", None) is not None:
                         _bg_cb = adapter.pop_post_delivery_callback(
                             session_key,
@@ -29466,46 +29715,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # breadcrumbs for the user to see what work happened. Only fires on
         # adapters that support ``delete_message`` (see init above); failures
         # are swallowed — deletion is best-effort.
-        if (
-            _cleanup_progress
-            and _cleanup_adapter is not None
-            and _cleanup_msg_ids
-            and session_key
-            and isinstance(response, dict)
-            and not response.get("failed")
-            and hasattr(_cleanup_adapter, "register_post_delivery_callback")
-        ):
-            _ids_snapshot = list(_cleanup_msg_ids)
-            _chat_id_snapshot = source.chat_id
-            _adapter_snapshot = _cleanup_adapter
-            _loop_snapshot = asyncio.get_running_loop()
-
-            def _cleanup_temp_bubbles() -> None:
-                async def _delete_all() -> None:
-                    for _mid in _ids_snapshot:
-                        try:
-                            await _adapter_snapshot.delete_message(
-                                _chat_id_snapshot, _mid
-                            )
-                        except Exception:
-                            pass
-                try:
-                    safe_schedule_threadsafe(
-                        _delete_all(), _loop_snapshot,
-                        logger=logger,
-                        log_message="Temp bubble cleanup scheduling error",
-                    )
-                except Exception:
-                    pass
-
-            try:
-                _cleanup_adapter.register_post_delivery_callback(
-                    session_key,
-                    _cleanup_temp_bubbles,
-                    generation=run_generation,
-                )
-            except Exception as _rpe:
-                logger.debug("Post-delivery cleanup registration failed: %s", _rpe)
+        _register_progress_cleanup(response)
 
         return response
 

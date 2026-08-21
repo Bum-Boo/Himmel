@@ -302,6 +302,12 @@ from gateway.platforms.base import (
 from plugins.platforms.telegram.telegram_ids import (
     normalize_telegram_chat_id,
 )
+from plugins.platforms.telegram.approval_ui import (
+    approval_decision_label,
+    approval_resolved_text,
+    build_approval_prompt,
+    normalize_approval_language,
+)
 from plugins.platforms.telegram.telegram_network import (
     SEED_FALLBACK_IPS,
     TelegramFallbackTransport,
@@ -730,6 +736,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._bot: Optional[Bot] = None
         self._webhook_mode: bool = False
         self._mention_patterns = self._compile_mention_patterns()
+        self._ignored_message_patterns = self._compile_ignored_message_patterns()
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
         self._disable_link_previews: bool = self._coerce_bool_extra("disable_link_previews", False)
         # Bot API 10.1 Rich Messages: render constructs the legacy MarkdownV2
@@ -743,6 +750,10 @@ class TelegramAdapter(BasePlatformAdapter):
         # as plain text, which is worse than degraded table/task-list rendering
         # for command snippets and mobile handoffs.
         self._rich_messages_enabled: bool = self._coerce_bool_extra("rich_messages", False)
+        rich_config = self.config.extra.get("rich_messages") if getattr(self.config, "extra", None) else None
+        self._rich_messages_allow_cjk: bool = bool(
+            isinstance(rich_config, dict) and rich_config.get("allow_cjk", False)
+        )
         # Rich draft previews use a separate opt-in. Telegram macOS / Desktop
         # can leave Bot API 10.1 rich draft frames visually overlaid until the
         # chat is redrawn, while final rich messages remain useful.
@@ -1891,6 +1902,10 @@ class TelegramAdapter(BasePlatformAdapter):
         value = self.config.extra.get(key) if getattr(self.config, "extra", None) else None
         if value is None:
             return default
+        if isinstance(value, dict) and key == "rich_messages":
+            value = value.get("enabled")
+            if value is None:
+                return default
         if isinstance(value, str):
             lowered = value.strip().lower()
             if lowered in {"true", "1", "yes", "on"}:
@@ -2006,6 +2021,8 @@ class TelegramAdapter(BasePlatformAdapter):
         The legacy MarkdownV2 path renders the same text cleanly, so skip rich
         delivery up front until affected clients age out.
         """
+        if getattr(self, "_rich_messages_allow_cjk", False):
+            return False
         return bool(content and self._RICH_CJK_RE.search(content))
 
     def _needs_rich_rendering(self, content: str) -> bool:
@@ -6144,6 +6161,8 @@ class TelegramAdapter(BasePlatformAdapter):
     async def send_exec_approval(
         self, chat_id: str, command: str, session_key: str,
         description: str = "dangerous command",
+        purpose: str = "",
+        approval_kind: str = "terminal",
         metadata: Optional[Dict[str, Any]] = None,
         allow_permanent: bool = True,
         allow_session: bool = True,
@@ -6158,7 +6177,15 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
 
         try:
-            text = self._format_exec_approval(command, description, smart_denied)
+            language = normalize_approval_language(
+                (getattr(self.config, "extra", None) or {}).get("approval_language")
+            )
+            prompt = build_approval_prompt(
+                command=command, description=description, purpose=purpose,
+                approval_kind=approval_kind, allow_permanent=allow_permanent,
+                allow_session=allow_session, smart_denied=smart_denied,
+                language=language,
+            )
 
             # Resolve thread context for thread replies
             thread_id = self._metadata_thread_id(metadata)
@@ -6171,26 +6198,15 @@ class TelegramAdapter(BasePlatformAdapter):
                 self._approval_counter = itertools.count(1)
             approval_id = next(self._approval_counter)
 
-            buttons = [
-                InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}")
-            ]
-            if not smart_denied and allow_session:
-                buttons.append(
-                    InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}")
-                )
-                if allow_permanent:
-                    buttons.append(
-                        InlineKeyboardButton("✅ Always", callback_data=f"ea:always:{approval_id}")
-                    )
-            buttons.append(InlineKeyboardButton("❌ Deny", callback_data=f"ea:deny:{approval_id}"))
-            # Pair into rows (2x2 for the full set) so labels stay readable on
-            # mobile — a single 4-button row truncates to "Allo… / Ses… / …".
-            rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
-            keyboard = InlineKeyboardMarkup(rows)
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton(label, callback_data=f"ea:{choice}:{approval_id}")
+                 for label, choice in row]
+                for row in prompt.button_rows
+            ])
 
             kwargs: Dict[str, Any] = {
                 "chat_id": normalize_telegram_chat_id(chat_id),
-                "text": text,
+                "text": prompt.text,
                 "parse_mode": ParseMode.HTML,
                 "reply_markup": keyboard,
                 **self._link_preview_kwargs(),
@@ -8655,11 +8671,37 @@ class TelegramAdapter(BasePlatformAdapter):
         )
 
     def _is_group_chat(self, message: Message) -> bool:
+        # Kept below the pattern compilers so __init__ can build both gates.
         chat = getattr(message, "chat", None)
         if not chat:
             return False
         chat_type = str(getattr(chat, "type", "")).split(".")[-1].lower()
         return chat_type in {"group", "supergroup"}
+
+    def _compile_ignored_message_patterns(self) -> List[re.Pattern]:
+        patterns = self.config.extra.get("ignored_message_patterns")
+        if patterns is None:
+            return []
+        return compile_mention_patterns(
+            patterns, log_prefix=self.name,
+            platform_label="telegram ignored-message",
+            display_label="Telegram ignored-message", logger_=logger,
+        )
+
+    def _message_matches_ignored_patterns(self, message: Message) -> bool:
+        patterns = getattr(self, "_ignored_message_patterns", ())
+        return any(
+            candidate and any(pattern.search(candidate) for pattern in patterns)
+            for candidate in (getattr(message, "text", None), getattr(message, "caption", None))
+        )
+
+    def _telegram_reply_to_bot_triggers(self) -> bool:
+        values = [
+            self._coerce_bool_extra(key, True)
+            for key in ("reply_to_bot_triggers", "reply_to_bot_in_groups")
+            if self.config.extra.get(key) is not None
+        ]
+        return all(values) if values else True
 
     @classmethod
     def _effective_message_thread_id(cls, message: Message) -> Optional[str]:
@@ -9049,6 +9091,8 @@ class TelegramAdapter(BasePlatformAdapter):
         chat_id_str = str(getattr(getattr(message, "chat", None), "id", ""))
         if self._telegram_exclusive_bot_mentions() and self._explicit_bot_mentions_exclude_self(message):
             return False
+        if self._message_matches_ignored_patterns(message):
+            return False
 
         allowed = self._telegram_observe_allowed_chats()
         # Observed context is shared at chat/topic scope so a later trigger from
@@ -9068,7 +9112,7 @@ class TelegramAdapter(BasePlatformAdapter):
             return False
         if not self._telegram_require_mention():
             return False
-        if self._is_reply_to_bot(message):
+        if self._telegram_reply_to_bot_triggers() and self._is_reply_to_bot(message):
             return False
         if self._message_mentions_bot(message):
             return False
@@ -9446,17 +9490,17 @@ class TelegramAdapter(BasePlatformAdapter):
 
         if guest_mention:
             return True
+        if self._message_mentions_bot(message):
+            return True
+        if self._message_matches_ignored_patterns(message):
+            return False
         if chat_id_str in self._telegram_free_response_chats():
             return True
         if self._telegram_is_free_response_topic(message):
             return True
         if not self._telegram_require_mention():
             return True
-        if self._is_reply_to_bot(message):
-            return True
-        # When guest_mode is True, _is_guest_mention already called
-        # _message_mentions_bot above — skip the redundant second call.
-        if not self._telegram_guest_mode() and self._message_mentions_bot(message):
+        if self._telegram_reply_to_bot_triggers() and self._is_reply_to_bot(message):
             return True
         return self._message_matches_mention_patterns(message)
 

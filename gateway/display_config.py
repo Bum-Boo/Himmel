@@ -52,6 +52,19 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
     # Disable when the platform should steer silently (the text still lands in
     # the active run; only the confirmation echo is suppressed).
     "busy_steer_ack_enabled": True,
+    "persona_progress_max_per_turn": 5,
+    "persona_progress_single_message": True,
+    "persona_progress_on_start": True,
+    # Optional threshold-based replacement copy for long-running gateway
+    # heartbeat bubbles. Default None preserves the legacy
+    # "⏳ Working — N min" text exactly.
+    "long_running_heartbeat_messages": None,
+    "long_running_heartbeat_media": None,
+    # Optional static in-character progress copy for tool_progress: persona.
+    "persona_progress_messages": None,
+    "persona_progress_selection": "sequential",
+    "persona_progress_media": None,
+    "persona_heartbeat_messages": None,
     # When true, delete tool-progress / "⏳ Working — N min" / status bubbles
     # after the final response lands on platforms that support message
     # deletion (e.g. Telegram). Off by default — progress is still shown
@@ -86,6 +99,9 @@ _TIER_HIGH = {
     "interim_assistant_messages": True,
     "long_running_notifications": True,
     "busy_ack_detail": True,
+    "persona_progress_max_per_turn": 5,
+    "persona_progress_single_message": True,
+    "persona_progress_on_start": True,
 }
 
 _TIER_MEDIUM = {
@@ -96,6 +112,9 @@ _TIER_MEDIUM = {
     "interim_assistant_messages": True,
     "long_running_notifications": True,
     "busy_ack_detail": True,
+    "persona_progress_max_per_turn": 5,
+    "persona_progress_single_message": True,
+    "persona_progress_on_start": True,
 }
 
 _TIER_LOW = {
@@ -106,6 +125,9 @@ _TIER_LOW = {
     "interim_assistant_messages": False,
     "long_running_notifications": False,
     "busy_ack_detail": False,
+    "persona_progress_max_per_turn": 5,
+    "persona_progress_single_message": True,
+    "persona_progress_on_start": True,
 }
 
 _TIER_MINIMAL = {
@@ -116,17 +138,17 @@ _TIER_MINIMAL = {
     "interim_assistant_messages": False,
     "long_running_notifications": False,
     "busy_ack_detail": False,
+    "persona_progress_max_per_turn": 5,
+    "persona_progress_single_message": True,
+    "persona_progress_on_start": True,
 }
 
 _PLATFORM_DEFAULTS: dict[str, dict[str, Any]] = {
     # Tier 1 — full edit support, personal/team use
-    # Telegram is usually a mobile inbox: keep tool_progress quiet and skip
-    # the verbose busy-ack iteration counter, but DO surface real mid-turn
-    # assistant commentary (interim_assistant_messages) and DO send periodic
-    # heartbeats (long_running_notifications) so the user has signal between
-    # turn start and final answer. Otherwise it looks like "typing..." for
-    # 30 minutes with nothing happening. Opt in to verbose iteration detail
-    # via display.platforms.telegram.busy_ack_detail / tool_progress.
+    # Telegram is usually a mobile inbox: keep tool_progress quiet by default.
+    # Profiles that want in-character progress can opt into
+    # display.platforms.telegram.tool_progress: persona without leaking raw
+    # tool names/paths/args.
     "telegram":    {
         **_TIER_HIGH,
         "tool_progress": "off",
@@ -265,7 +287,7 @@ def _normalise(setting: str, value: Any) -> Any:
             return "off"
         if val in {"true", "1", "yes", "on"}:
             return "all"
-        return val if val in {"off", "new", "all", "verbose", "log"} else "all"
+        return val if val in {"off", "new", "all", "verbose", "log", "persona"} else "all"
     if setting in {
         "show_reasoning",
         "streaming",
@@ -274,6 +296,8 @@ def _normalise(setting: str, value: Any) -> Any:
         "busy_ack_detail",
         "busy_steer_ack_enabled",
         "thinking_progress",
+        "persona_progress_single_message",
+        "persona_progress_on_start",
     }:
         if isinstance(value, str):
             val = value.strip().lower()
@@ -308,4 +332,190 @@ def _normalise(setting: str, value: Any) -> Any:
             return int(value)
         except (TypeError, ValueError):
             return 0
+    if setting == "persona_progress_max_per_turn":
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 1
     return value
+
+
+_DEFAULT_PERSONA_PROGRESS_MESSAGES = [
+    "확인하는 중이야.",
+    "단서를 확인하는 중이야.",
+    "조용히 맞춰보는 중이야.",
+    "마법식이 어긋나지 않게 보고 있어.",
+    "조금만 기다려. 흐름을 맞추는 중이야.",
+]
+
+
+def build_long_running_heartbeat_text(
+    user_config: dict,
+    platform_key: str,
+    *,
+    elapsed_minutes: int,
+    status_detail: str = "",
+) -> str:
+    """Return gateway long-running heartbeat copy.
+
+    Default preserves the upstream deterministic text. Profiles can opt into
+    static threshold-based copy with display.platforms.<platform>.
+    long_running_heartbeat_messages. No LLM is called and status details are
+    appended only when the selected rule explicitly asks for it.
+    """
+    try:
+        elapsed = max(0, int(elapsed_minutes))
+    except (TypeError, ValueError):
+        elapsed = 0
+    detail = str(status_detail or "")
+    default_text = f"⏳ Working — {elapsed} min{detail}"
+
+    rules = resolve_display_setting(
+        user_config,
+        platform_key,
+        "long_running_heartbeat_messages",
+        None,
+    )
+    if not isinstance(rules, list):
+        return default_text
+
+    selected: dict[str, Any] | None = None
+    selected_threshold = -1
+    for raw_rule in rules:
+        if not isinstance(raw_rule, dict):
+            continue
+        try:
+            threshold = int(raw_rule.get("threshold_minutes", 0))
+        except (TypeError, ValueError):
+            continue
+        text = str(raw_rule.get("text") or "").strip()
+        if text and threshold <= elapsed and threshold >= selected_threshold:
+            selected = raw_rule
+            selected_threshold = threshold
+
+    if selected is None:
+        return default_text
+
+    text = str(selected.get("text") or "").strip()
+    if "{elapsed_minutes}" in text or "{minutes}" in text:
+        try:
+            text = text.format(elapsed_minutes=elapsed, minutes=elapsed)
+        except (KeyError, IndexError, ValueError):
+            pass
+    if selected.get("append_status_detail") is True and detail:
+        text = f"{text}{detail}"
+    return text
+
+
+def build_persona_progress_message(
+    user_config: dict,
+    platform_key: str,
+    *,
+    sequence: int = 0,
+    tool_name: str | None = None,
+    rng=None,
+) -> str:
+    """Return a safe persona progress line for gateway tool progress.
+
+    tool_progress: persona intentionally ignores tool names, arguments, paths,
+    and previews in rendered text. tool_name is accepted only for caller
+    compatibility and future local selection rules.
+    """
+    messages = resolve_display_setting(
+        user_config,
+        platform_key,
+        "persona_progress_messages",
+        None,
+    )
+    if not isinstance(messages, list) or not messages:
+        messages = _DEFAULT_PERSONA_PROGRESS_MESSAGES
+    cleaned = [str(m).strip() for m in messages if str(m).strip()]
+    if not cleaned:
+        cleaned = _DEFAULT_PERSONA_PROGRESS_MESSAGES
+
+    selection = str(
+        resolve_display_setting(
+            user_config,
+            platform_key,
+            "persona_progress_selection",
+            "sequential",
+        )
+        or "sequential"
+    ).lower()
+    if selection == "random":
+        if rng is None:
+            import random
+            rng = random
+        try:
+            return str(rng.choice(cleaned))
+        except Exception:
+            return cleaned[0]
+    try:
+        idx = max(0, int(sequence)) % len(cleaned)
+    except (TypeError, ValueError):
+        idx = 0
+    return cleaned[idx]
+
+
+def _resolve_progress_media(
+    user_config: dict,
+    platform_key: str,
+    message: str,
+    setting: str,
+) -> dict[str, str] | None:
+    """Resolve a deterministic media rule for a rendered progress line."""
+    text = str(message or "").strip()
+    if not text:
+        return None
+    rules = resolve_display_setting(user_config, platform_key, setting, None)
+    if not isinstance(rules, list):
+        return None
+    for raw_rule in rules:
+        if not isinstance(raw_rule, dict):
+            continue
+        path = (
+            raw_rule.get("path")
+            or raw_rule.get("media_path")
+            or raw_rule.get("image_path")
+        )
+        if not isinstance(path, str) or not path.strip():
+            continue
+        exact = (
+            raw_rule.get("text")
+            or raw_rule.get("message")
+            or raw_rule.get("exact")
+        )
+        contains = raw_rule.get("contains")
+        matched = False
+        if isinstance(exact, str) and exact.strip():
+            matched = text == exact.strip()
+        if not matched and isinstance(contains, str) and contains.strip():
+            matched = contains.strip() in text
+        if not matched:
+            continue
+        media: dict[str, str] = {"path": path.strip()}
+        caption = raw_rule.get("caption")
+        if isinstance(caption, str) and caption.strip():
+            media["caption"] = caption.strip()
+        return media
+    return None
+
+
+def resolve_persona_progress_media(
+    user_config: dict,
+    platform_key: str,
+    message: str,
+) -> dict[str, str] | None:
+    return _resolve_progress_media(
+        user_config, platform_key, message, "persona_progress_media"
+    )
+
+
+def resolve_long_running_heartbeat_media(
+    user_config: dict,
+    platform_key: str,
+    message: str,
+) -> dict[str, str] | None:
+    return _resolve_progress_media(
+        user_config, platform_key, message, "long_running_heartbeat_media"
+    )

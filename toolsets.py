@@ -67,7 +67,7 @@ _HERMES_CORE_TOOLS = [
     # GUI gateway (tui_gateway/server.py::_load_enabled_toolsets) — keeping them
     # off every CLI/messaging/cron schema (narrow waist).
     # Session history search
-    "session_search",
+    "session_search", "current_chat_context",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
@@ -253,7 +253,7 @@ TOOLSETS = {
     
     "session_search": {
         "description": "Search and recall past conversations with summarization",
-        "tools": ["session_search"],
+        "tools": ["session_search", "current_chat_context"],
         "includes": []
     },
 

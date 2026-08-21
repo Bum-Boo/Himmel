@@ -1332,6 +1332,41 @@ def direct_api_call(agent, api_kwargs: dict):
             )
 
 
+def _preflight_credential_usage_guard(agent) -> None:
+    """Re-select an allowed credential and fail closed before inference."""
+    pool = getattr(agent, "_credential_pool", None)
+    if pool is None:
+        return
+    from agent.credential_pool import CodexUsageGuardError, CodexUsageLimitReached
+
+    try:
+        if not pool.usage_guard_enabled():
+            return
+        selected = pool.select()
+        if selected is None:
+            raise CodexUsageLimitReached(
+                "No Codex credential is available within the protected "
+                "included-plan limits; request blocked before inference."
+            )
+        selected_key = str(
+            getattr(selected, "runtime_api_key", None)
+            or getattr(selected, "access_token", "")
+            or ""
+        )
+        if selected_key and selected_key != str(getattr(agent, "api_key", "") or ""):
+            agent._swap_credential(selected)
+    except CodexUsageGuardError:
+        logger.error(
+            "credential pool: Codex included-plan protection blocked the "
+            "request before inference"
+        )
+        raise
+    except Exception as exc:
+        # Optional soft thresholds preserve their historical fail-open behavior;
+        # the hard included-plan path raises CodexUsageGuardError and never lands here.
+        logger.warning("credential pool: usage-guard preflight failed open: %s", exc)
+
+
 def interruptible_api_call(agent, api_kwargs: dict):
     """
     Run the API call in a background thread so the main conversation loop
@@ -1346,6 +1381,8 @@ def interruptible_api_call(agent, api_kwargs: dict):
     the main retry loop can try again with backoff / credential rotation /
     provider fallback.
     """
+    _preflight_credential_usage_guard(agent)
+
     # Cron and other non-interactive, nested-pool contexts must not spawn the
     # interrupt worker — it wedges before the socket opens on the 2nd+ call
     # (#62151). Run inline instead. See should_use_direct_api_call.

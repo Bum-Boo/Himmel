@@ -32,7 +32,7 @@ async def _fire_post_delivery_cb(cb):
     result = cb()
     if _inspect.isawaitable(result):
         await result
-from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.platforms.base import BasePlatformAdapter, MessageEvent, SendResult
 from gateway.session import SessionSource
 
 
@@ -50,6 +50,7 @@ class CleanupCaptureAdapter(BasePlatformAdapter):
     def __init__(self, platform=Platform.TELEGRAM):
         super().__init__(PlatformConfig(enabled=True, token="***"), platform)
         self.sent = []
+        self.sent_images = []
         self.edits = []
         self.deleted = []
 
@@ -67,6 +68,27 @@ class CleanupCaptureAdapter(BasePlatformAdapter):
         mid = self._mint_id()
         self.sent.append(
             {"chat_id": chat_id, "content": content, "message_id": mid, "metadata": metadata}
+        )
+        return SendResult(success=True, message_id=mid)
+
+    async def send_image_file(
+        self,
+        chat_id,
+        image_path,
+        caption=None,
+        reply_to=None,
+        metadata=None,
+        **kwargs,
+    ) -> SendResult:
+        mid = self._mint_id()
+        self.sent_images.append(
+            {
+                "chat_id": chat_id,
+                "image_path": image_path,
+                "caption": caption,
+                "message_id": mid,
+                "metadata": metadata,
+            }
         )
         return SendResult(success=True, message_id=mid)
 
@@ -295,3 +317,132 @@ async def test_cleanup_chains_with_existing_callback(monkeypatch, tmp_path):
     # deletes at least one progress bubble.
     assert pre_existing_fired == [True]
     assert len(adapter.deleted) >= 1
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deletes_persona_progress_media_on_success(monkeypatch, tmp_path):
+    """Persona progress photos are temporary bubbles, not permanent history."""
+    media_path = tmp_path / "persona-progress.jpg"
+    media_path.write_bytes(b"test-image")
+
+    adapter = CleanupCaptureAdapter()
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, ProgressAgent, cleanup_on=True)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "persona")
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {
+            "display": {
+                "platforms": {
+                    "telegram": {
+                        "tool_progress": "persona",
+                        "cleanup_progress": True,
+                        "persona_progress_messages": ["확인하는 중이야."],
+                        "persona_progress_media": [
+                            {
+                                "text": "확인하는 중이야.",
+                                "path": str(media_path),
+                            }
+                        ],
+                    }
+                }
+            }
+        },
+    )
+
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="-1001")
+    session_key = "agent:main:telegram:group:-1001"
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-media",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    assert len(adapter.sent_images) == 1
+    image_mid = adapter.sent_images[0]["message_id"]
+
+    cb = adapter.pop_post_delivery_callback(session_key)
+    assert callable(cb)
+    await _fire_post_delivery_cb(cb)
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        if any(entry["message_id"] == image_mid for entry in adapter.deleted):
+            break
+
+    assert {entry["message_id"] for entry in adapter.deleted} >= {image_mid}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_deletes_progress_media_before_queued_followup(monkeypatch, tmp_path):
+    """Every completed turn in an in-band follow-up chain cleans its own photo."""
+    media_path = tmp_path / "queued-persona-progress.jpg"
+    media_path.write_bytes(b"test-image")
+
+    adapter = CleanupCaptureAdapter()
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, ProgressAgent, cleanup_on=True)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "persona")
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {
+            "display": {
+                "platforms": {
+                    "telegram": {
+                        "tool_progress": "persona",
+                        "cleanup_progress": True,
+                        "persona_progress_messages": ["확인하는 중이야."],
+                        "persona_progress_media": [
+                            {
+                                "text": "확인하는 중이야.",
+                                "path": str(media_path),
+                            }
+                        ],
+                    }
+                }
+            }
+        },
+    )
+
+    source = SessionSource(
+        platform=Platform.TELEGRAM,
+        chat_id="-1001",
+        chat_type="group",
+    )
+    session_key = "agent:main:telegram:group:-1001"
+    adapter._pending_messages[session_key] = MessageEvent(
+        text="queued follow-up",
+        source=source,
+        message_id="queued-1",
+    )
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-media-followup",
+        session_key=session_key,
+    )
+
+    assert result["final_response"] == "done"
+    assert len(adapter.sent_images) == 2
+
+    cb = adapter.pop_post_delivery_callback(session_key)
+    assert callable(cb)
+    await _fire_post_delivery_cb(cb)
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+        if len(adapter.deleted) >= len(adapter.sent_images):
+            break
+
+    sent_image_ids = {entry["message_id"] for entry in adapter.sent_images}
+    deleted_ids = {entry["message_id"] for entry in adapter.deleted}
+    assert deleted_ids >= sent_image_ids

@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -3436,6 +3437,52 @@ def _normalize_service_definition(text: str) -> str:
     return "\n".join(line.rstrip() for line in text.strip().splitlines())
 
 
+_HERMES_NODE_BIN_PATH_RE = re.compile(r"(^|/)\.hermes/(profiles/[^/]+/)?node/bin/?$")
+_HERMES_NODE_ROOT_PATH_RE = re.compile(r"(^|/)\.hermes/(profiles/[^/]+/)?node/?$")
+
+
+def _normalize_systemd_path_for_comparison(text: str) -> str:
+    """Normalize volatile and duplicate entries in a systemd PATH.
+
+    ``generate_systemd_unit()`` may include both ``node`` and ``node/bin`` from
+    a profile-specific Hermes path.  The same directories can be reached via a
+    symlinked Hermes home, so collapse each managed form to a stable token.
+    Also ignore duplicate PATH entries and harmless trailing slashes; WSL
+    interop discovery can otherwise append the same Windows directory twice.
+    """
+    normalized_lines: list[str] = []
+    prefix = 'Environment="PATH='
+    suffix = '"'
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix) and stripped.endswith(suffix):
+            path_value = stripped[len(prefix) : -len(suffix)]
+            entries: list[str] = []
+            hermes_node_seen = False
+            hermes_node_root_seen = False
+            seen_entries: set[str] = set()
+            for entry in path_value.split(os.pathsep):
+                normalized_entry = entry.rstrip("/") or entry
+                if _HERMES_NODE_BIN_PATH_RE.search(normalized_entry):
+                    if hermes_node_seen:
+                        continue
+                    entries.append("__HERMES_NODE_BIN__")
+                    hermes_node_seen = True
+                elif _HERMES_NODE_ROOT_PATH_RE.search(normalized_entry):
+                    if hermes_node_root_seen:
+                        continue
+                    entries.append("__HERMES_NODE_ROOT__")
+                    hermes_node_root_seen = True
+                else:
+                    if normalized_entry in seen_entries:
+                        continue
+                    entries.append(normalized_entry)
+                    seen_entries.add(normalized_entry)
+            line = f'{prefix}{os.pathsep.join(entries)}{suffix}'
+        normalized_lines.append(line)
+    return "\n".join(normalized_lines)
+
+
 # Directives that older systemd versions silently ignore/strip.  Normalize
 # them out of stale-check comparisons so a unit that differs only by these
 # directives is not perpetually flagged as outdated.
@@ -3508,10 +3555,14 @@ def systemd_unit_is_current(system: bool = False) -> bool:
     # (RestartMaxDelaySec, RestartSteps) so a unit that differs only by
     # those directives is not perpetually flagged as outdated.
     norm_installed = _normalize_service_definition(
-        _strip_optional_systemd_directives(installed)
+        _normalize_systemd_path_for_comparison(
+            _strip_optional_systemd_directives(installed)
+        )
     )
     norm_expected = _normalize_service_definition(
-        _strip_optional_systemd_directives(expected)
+        _normalize_systemd_path_for_comparison(
+            _strip_optional_systemd_directives(expected)
+        )
     )
     return norm_installed == norm_expected
 

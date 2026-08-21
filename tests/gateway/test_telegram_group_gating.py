@@ -22,6 +22,9 @@ def _make_adapter(
     group_allowed_chats=None,
     guest_mode=None,
     observe_unmentioned_group_messages=None,
+    reply_to_bot_triggers=None,
+    reply_to_bot_in_groups=None,
+    ignored_message_patterns=None,
     bot_username="hermes_bot",
 ):
     from plugins.platforms.telegram.adapter import TelegramAdapter
@@ -65,6 +68,17 @@ def _make_adapter(
         extra["guest_mode"] = guest_mode
     if observe_unmentioned_group_messages is not None:
         extra["observe_unmentioned_group_messages"] = observe_unmentioned_group_messages
+    if reply_to_bot_triggers is not None:
+        extra["reply_to_bot_triggers"] = reply_to_bot_triggers
+    else:
+        # Keep tests isolated from profile-scoped TELEGRAM_REPLY_* env values.
+        extra["reply_to_bot_triggers"] = True
+    if reply_to_bot_in_groups is not None:
+        extra["reply_to_bot_in_groups"] = reply_to_bot_in_groups
+    else:
+        extra["reply_to_bot_in_groups"] = True
+    if ignored_message_patterns is not None:
+        extra["ignored_message_patterns"] = ignored_message_patterns
 
     adapter = object.__new__(TelegramAdapter)
     adapter.platform = Platform.TELEGRAM
@@ -76,6 +90,7 @@ def _make_adapter(
     adapter._text_batch_delay_seconds = 0.01
     adapter._text_batch_split_delay_seconds = 0.01
     adapter._mention_patterns = adapter._compile_mention_patterns()
+    adapter._ignored_message_patterns = adapter._compile_ignored_message_patterns()
     adapter._forum_lock = asyncio.Lock()
     adapter._forum_command_registered = set()
     adapter._active_sessions = {}
@@ -407,6 +422,54 @@ def test_free_response_topic_messages_are_dispatched_not_observed():
     other_topic = _group_message("side chatter", chat_id=-200, thread_id=32)
     assert adapter._should_process_message(other_topic) is False
     assert adapter._should_observe_unmentioned_group_message(other_topic) is True
+
+
+def test_reply_only_group_message_respects_disabled_reply_triggers():
+    """Forum topic-root replies must not bypass an explicit no-reply policy."""
+    adapter = _make_adapter(
+        require_mention=True,
+        reply_to_bot_triggers=False,
+        reply_to_bot_in_groups=False,
+    )
+
+    reply_only = _group_message("야", chat_id=-200, thread_id=1780, reply_to_bot=True)
+    assert adapter._should_process_message(reply_only) is False
+
+    directly_mentioned = _group_message(
+        "@hermes_bot 야",
+        chat_id=-200,
+        thread_id=1780,
+        reply_to_bot=True,
+        entities=[_mention_entity("@hermes_bot 야")],
+    )
+    assert adapter._should_process_message(directly_mentioned) is True
+
+
+def test_free_response_topic_ignores_messages_addressed_to_another_profile():
+    """A free-response profile must stay quiet when another member is called."""
+    adapter = _make_adapter(
+        require_mention=True,
+        free_response_topics=["-200:1770"],
+        ignored_message_patterns=[r"^\s*(?:\[[^\]\n]+\]\s*)?(?:프리렌|frieren)(?:\s+|[,，.。:：!！?？]|$)"],
+    )
+
+    assert adapter._should_process_message(
+        _group_message("[example-user|42424242] 프리렌 얘 봐줘", chat_id=-200, thread_id=1770)
+    ) is False
+    assert adapter._should_process_message(
+        _group_message("someone else 얘 봐줘", chat_id=-200, thread_id=1770)
+    ) is True
+
+    # An explicit self @mention always wins, even if another profile name is present.
+    self_mention = "@hermes_bot 프리렌 상태만 확인해"
+    assert adapter._should_process_message(
+        _group_message(
+            self_mention,
+            chat_id=-200,
+            thread_id=1770,
+            entities=[_mention_entity(self_mention)],
+        )
+    ) is True
 
 
 def test_guest_mode_allows_only_direct_mentions_outside_allowed_chats():

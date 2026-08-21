@@ -77,6 +77,35 @@ def _make_adapter(extra=None):
     return adapter
 
 
+def test_nested_rich_messages_mapping_controls_shared_renderer():
+    enabled = TelegramAdapter(PlatformConfig(
+        enabled=True,
+        token="fake-token",
+        extra={"rich_messages": {"enabled": True}},
+    ))
+    disabled = TelegramAdapter(PlatformConfig(
+        enabled=True,
+        token="fake-token",
+        extra={"rich_messages": {"enabled": False}},
+    ))
+    assert enabled._rich_messages_enabled is True
+    assert disabled._rich_messages_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_nested_allow_cjk_sends_korean_details_as_rich():
+    adapter = _make_adapter({
+        "rich_messages": {"enabled": True, "allow_cjk": True},
+    })
+    result = await adapter.send(
+        "12345",
+        "<details>\n<summary>피드백</summary>\n\n한국어 본문\n\n</details>",
+    )
+    assert result.success is True
+    assert adapter._bot.do_api_request.call_args.args[0] == "sendRichMessage"
+    adapter._bot.send_message.assert_not_called()
+
+
 def _rich_api_kwargs(adapter):
     """Return the api_kwargs dict from the single sendRichMessage call."""
     call = adapter._bot.do_api_request.call_args

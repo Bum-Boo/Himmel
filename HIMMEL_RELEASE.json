@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "name": "Himmel",
+  "distribution": "Himmel Hermes",
+  "version": "2026.08.1-preview.1",
+  "status": "public-preview",
+  "published_at": "2026-08-21T18:35:24+09:00",
+  "upstream": {
+    "repository": "https://github.com/NousResearch/hermes-agent",
+    "tag": "v2026.8.18",
+    "peeled_commit_sha": "e624e9fde561e1add9388384012b295fde669ade",
+    "annotated_tag_object_sha": "9f13bbbf8423427e159c78066356ca0e27ca6b74"
+  },
+  "privacy": {
+    "raw_local_evidence_included": false,
+    "runtime_state_included": false,
+    "personal_test_fixtures_included": false
+  },
+  "verification": {
+    "focused_tests": "230 passed",
+    "honcho_regression": "25 passed in each of 3 fresh processes",
+    "tooling_tests": "64 passed",
+    "full_suite": "34607 passed, 12 failed, 308 skipped",
+    "release_posture": "preview; known upstream/platform test failures remain"
+  }
+}

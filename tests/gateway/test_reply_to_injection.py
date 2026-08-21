@@ -55,7 +55,7 @@ async def test_reply_prefix_injected_when_text_absent_from_history():
 
     assert result is not None
     assert result.startswith(
-        '[Replying to: "Japan is great for culture, food, and efficiency."]'
+        '[Replying to message id 42: "Japan is great for culture, food, and efficiency."]'
     )
     assert result.endswith("What's the best time to go?")
 
@@ -95,7 +95,30 @@ async def test_reply_prefix_still_injected_when_text_in_history():
     )
 
     assert result is not None
-    assert result.startswith(f'[Replying to: "{quoted}"]')
+    assert result.startswith(f'[Replying to message id 42: "{quoted}"]')
     assert result.endswith("What's the best time to go?")
+
+
+@pytest.mark.asyncio
+async def test_reply_without_quoted_text_points_to_current_chat_context():
+    runner = _make_runner()
+    source = _source()
+    event = MessageEvent(
+        text="이거 다시 확인해줘",
+        source=source,
+        reply_to_message_id="tg-99",
+        reply_to_text=None,
+    )
+
+    result = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert result is not None
+    assert "message id tg-99" in result
+    assert "Use current_chat_context" in result
+    assert result.endswith("이거 다시 확인해줘")
 
 
