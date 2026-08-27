@@ -54,6 +54,8 @@ uv sync --locked --extra all
 
 공식 Hermes 설치 script는 Himmel이 아니라 upstream 배포판을 설치합니다. Himmel을 실행하려면 이 저장소를 clone하고 위 source 설치 절차를 사용하세요. Wheel과 source distribution build는 저장소의 Nix build 경로 밖에서는 의도적으로 지원하지 않으며, `uv sync` editable 설치는 지원합니다.
 
+source tree에는 호환성과 테스트를 위해 upstream Windows installer인 `scripts/install.ps1`가 남아 있습니다. 이 script는 upstream installer 계약을 따르며 Himmel의 권장 설치 경로가 아닙니다. Himmel은 위의 pinned source 절차로 설치하세요.
+
 ## 시작하기
 
 POSIX에서는 `.venv/bin/hermes`, Windows에서는 `.venv\Scripts\hermes.exe`로 다음 명령을 실행합니다.

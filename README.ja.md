@@ -54,6 +54,8 @@ uv sync --locked --extra all
 
 Hermes 公式のインストール script は Himmel ではなく upstream ディストリビューションをインストールします。Himmel を実行するには、このリポジトリを clone して上記の source インストールを使用してください。Wheel と source distribution の build は、リポジトリの Nix build 経路以外では意図的に非対応です。`uv sync` による editable install は対応しています。
 
+source tree には互換性とテストのため、upstream Windows installer の `scripts/install.ps1` が残されています。この script は upstream installer contract に従うもので、Himmel の推奨 install path ではありません。Himmel には上記の pinned source 手順を使ってください。
+
 ## はじめに
 
 POSIX では `.venv/bin/hermes`、Windows では `.venv\Scripts\hermes.exe` を使って次のコマンドを実行します。

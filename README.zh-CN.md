@@ -54,6 +54,8 @@ uv sync --locked --extra all
 
 Hermes 官方安装脚本安装的是上游发行版，而不是 Himmel。要运行 Himmel，请 clone 本仓库并使用上述源码安装方式。除仓库的 Nix build 路径外，wheel 和 source distribution build 被有意设为不支持；`uv sync` editable 安装受支持。
 
+source tree 为兼容性与测试保留了 upstream Windows installer：`scripts/install.ps1`。该脚本遵循 upstream installer contract，并不是 Himmel 的推荐安装路径。安装 Himmel 时请使用上面的 pinned source 流程。
+
 ## 快速开始
 
 在 POSIX 系统中通过 `.venv/bin/hermes`、在 Windows 中通过 `.venv\Scripts\hermes.exe` 运行以下命令：

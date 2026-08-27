@@ -54,6 +54,8 @@ Configure your provider credentials locally after installation. Do not commit `.
 
 The official Hermes installation scripts install the upstream distribution, not Himmel. To run Himmel, clone this repository and use the source installation above. Wheel and source-distribution builds are intentionally unsupported outside the repository’s Nix build path; editable `uv sync` installs are supported.
 
+The source tree retains the upstream Windows installer at `scripts/install.ps1` for compatibility and testing. That script follows the upstream installer contract; it is not the recommended Himmel installation path. Use the pinned source workflow above when installing Himmel.
+
 ## Getting started
 
 Run these through `.venv/bin/hermes` on POSIX systems or `.venv\Scripts\hermes.exe` on Windows:
