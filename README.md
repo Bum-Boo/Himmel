@@ -1,36 +1,38 @@
+[English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [中文](README.zh-CN.md) | [Español](README.es.md) | [اردو](README.ur-pk.md)
+
 # Himmel Hermes ☀️
 
-> **A privacy-safe, reproducible downstream of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent).**
+> A privacy-safe, reproducible downstream distribution of [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent).
 
-**Himmel**은 공식 Hermes Agent를 직접 덮어쓰지 않고, 검증된 upstream 버전에 작은 downstream 변경을 더해 운영하기 위한 공개 배포판입니다. 공식 소스의 장점을 유지하면서 Telegram 운영, 승인 UI, 진행 상태, gateway 안정성처럼 실제 장기 운영에서 필요한 동작을 보강합니다.
+Himmel applies a small, public downstream layer to a pinned, clean Hermes Agent source tree. It preserves the upstream agent while strengthening behavior used in long-running Telegram and gateway deployments, including quota protection, progress and approval presentation, reply scoping, cleanup, restart handling, routing exclusions, and Honcho identity refreshes.
 
-이 저장소는 개인 Hermes 환경을 그대로 복사한 것이 아닙니다. **공식 upstream의 clean source에 공개 가능한 변경만 적용해 다시 만든 전체 소스 저장소**입니다.
+This repository is not a copy of a personal Hermes environment. It contains the complete runnable source tree reconstructed from the identified upstream baseline plus the public downstream changes. It excludes private profiles, credentials, conversations, runtime databases, and raw local provenance patches.
 
-## 무엇이 다른가요?
+## Downstream scope
 
-Himmel의 downstream 계층은 다음 동작을 추가하거나 강화합니다.
+Himmel adds or strengthens:
 
-1. 포함 플랜 사용량을 넘기지 않도록 하는 fail-closed 보호
-2. persona별 진행 상태와 제한된 heartbeat 표시
-3. allowlist 기반 gateway restart broker와 systemd 처리
-4. 현재 세션으로 한정된 reply context
-5. Telegram rich-message 정책 통합
-6. turn 종료 시 progress·media 정리
-7. Telegram group-routing 제외 규칙
-8. 구조화되고 지역화된 human-approval UI
-9. Honcho identity 설정의 안전한 fresh-read 무효화
+1. fail-closed included-plan quota protection;
+2. bounded persona progress and status presentation;
+3. allowlisted gateway restart brokering and systemd handling;
+4. reply context bounded to the current session;
+5. Telegram rich-message policy integration;
+6. turn-scoped progress and media cleanup;
+7. explicit Telegram group-routing exclusions;
+8. structured, localized human-approval UI; and
+9. fresh-read Honcho identity cache invalidation.
 
-간단한 patch 범위는 [`.himmel/PATCHSET.md`](.himmel/PATCHSET.md), 정확한 upstream 기준은 [`.himmel/UPSTREAM.json`](.himmel/UPSTREAM.json)에서 확인할 수 있습니다.
+See [`.himmel/PATCHSET.md`](.himmel/PATCHSET.md) for the concise downstream scope and [`.himmel/UPSTREAM.json`](.himmel/UPSTREAM.json) for the exact upstream identity.
 
-## 설치
+## Install from source
 
-### 요구 사항
+### Requirements
 
-- Python `3.11`–`3.13`
+- Python `3.11`–`3.13` (the package requires `>=3.11,<3.14`)
 - [`uv`](https://docs.astral.sh/uv/getting-started/installation/)
 - Git
 
-### Linux · macOS · WSL2
+Linux, macOS, or WSL2:
 
 ```bash
 git clone https://github.com/Bum-Boo/Himmel.git
@@ -39,7 +41,7 @@ uv sync --locked --extra all
 .venv/bin/hermes
 ```
 
-### Windows PowerShell
+Windows PowerShell:
 
 ```powershell
 git clone https://github.com/Bum-Boo/Himmel.git
@@ -48,41 +50,64 @@ uv sync --locked --extra all
 .venv\Scripts\hermes.exe
 ```
 
-Provider credential은 설치 후 자신의 로컬 환경에서 설정하세요. `.env`, token, key 파일은 Git에 커밋하면 안 됩니다.
+Configure your provider credentials locally after installation. Do not commit `.env` files, API keys, tokens, cookies, or credential files.
 
-## 개인정보와 공개 범위
+The official Hermes installation scripts install the upstream distribution, not Himmel. To run Himmel, clone this repository and use the source installation above. Wheel and source-distribution builds are intentionally unsupported outside the repository’s Nix build path; editable `uv sync` installs are supported.
 
-이 저장소에 **포함되지 않는 것**:
+## Getting started
 
-- 개인 profile·SOUL·memory·session·메시지 본문
-- API key, credential, cookie, token, `.env`
-- cron 실행 이력과 개인 automation state
-- Kanban DB와 gateway runtime state
-- 개인 홈 경로, Telegram 사용자 ID, Obsidian vault 경로
-- 원본 비공개 patch 본문
+Run these through `.venv/bin/hermes` on POSIX systems or `.venv\Scripts\hermes.exe` on Windows:
 
-공개 저장소에는 실행 가능한 source, 테스트, MIT 라이선스, upstream 식별 정보와 공개 가능한 downstream 코드만 포함합니다.
+```text
+hermes                 Start the interactive agent
+hermes --tui           Start the modern terminal UI
+hermes setup           Run the setup wizard
+hermes model           Configure the model and provider
+hermes tools           Configure tools and toolsets
+hermes gateway setup   Configure messaging platforms
+hermes gateway start   Start the messaging gateway
+hermes doctor          Diagnose the installation
+hermes --help           Show the current command reference
+```
 
-## 현재 상태
+User settings belong in `~/.hermes/config.yaml`; `~/.hermes/.env` is for secrets. Upstream documentation is available at [hermes-agent.nousresearch.com/docs](https://hermes-agent.nousresearch.com/docs/). Some documentation describes upstream installation and release behavior, so use this README’s source-install instructions for Himmel.
 
-| 항목 | 값 |
+## Release status
+
+| Item | Value |
 |---|---|
-| 채널 | **Public Preview** |
+| Himmel version | `2026.08.1-preview.1` |
+| Channel | **Public Preview** |
 | Upstream tag | `v2026.8.18` |
-| Upstream commit | `e624e9fde561e1add9388384012b295fde669ade` |
-| Downstream focused tests | `230 passed` |
-| Honcho regression | `25 passed × 3` |
-| Full suite | `34,607 passed · 12 failed · 308 skipped` |
+| Upstream peeled commit | `e624e9fde561e1add9388384012b295fde669ade` |
+| Python package metadata | `hermes-agent` `0.20.4` |
+| Focused downstream tests | `230 passed` |
+| Honcho regression | `25 passed` in each of 3 fresh processes |
+| Tooling tests | `64 passed` |
+| Full suite | `34,607 passed, 12 failed, 308 skipped` |
 
-현재 preview에는 upstream 또는 플랫폼 환경에서 재현되는 알려진 테스트 실패가 남아 있습니다. 따라서 자동 운영 승격판이 아니라 **직접 검토해 설치하는 공개 preview**로 배포합니다. 릴리스 식별 정보는 [`HIMMEL_RELEASE.json`](HIMMEL_RELEASE.json)에 있습니다.
+Known upstream or platform test failures remain. This release is therefore a public preview for users who review it before installation, not an automatic production promotion. The machine-readable record is [`HIMMEL_RELEASE.json`](HIMMEL_RELEASE.json).
 
-## Upstream과 라이선스
+## Privacy and publication boundary
 
-Himmel은 Nous Research의 공식 제품이나 공식 릴리스가 아닌 독립 downstream입니다.
+This public repository excludes:
 
-- Upstream: [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
-- 공식 문서: [hermes-agent.nousresearch.com/docs](https://hermes-agent.nousresearch.com/docs)
-- License: [MIT](LICENSE)
+- personal profiles, SOUL files, memory, sessions, and message content;
+- API keys, credentials, cookies, tokens, and `.env` files;
+- cron history and personal automation state;
+- Kanban databases and gateway runtime state;
+- personal home paths, Telegram user IDs, and private vault paths; and
+- raw private patch provenance.
+
+It includes runnable source, tests, the retained MIT license, the upstream identity record, and public downstream code.
+
+## Upstream acknowledgement and license
+
+Himmel is an independent downstream distribution. It is not an official Nous Research product or release and is not endorsed by Nous Research.
+
+- Upstream project: [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
+- Upstream documentation: [hermes-agent.nousresearch.com/docs](https://hermes-agent.nousresearch.com/docs/)
 - Downstream notice: [HIMMEL_NOTICE.md](HIMMEL_NOTICE.md)
+- License: [MIT](LICENSE)
 
-공식 Hermes 설치 스크립트는 upstream 버전을 설치합니다. **Himmel을 설치하려면 이 저장소를 clone하여 위의 source 설치 절차를 사용하세요.**
+The MIT license governs legal reuse and redistribution; follow its copyright-and-permission-notice condition as stated in [`LICENSE`](LICENSE). Separately, as a courtesy—not an additional license requirement—please mention [@Bum-Boo](https://github.com/Bum-Boo) and the [original Himmel repository](https://github.com/Bum-Boo/Himmel) when adapting or sharing this downstream work.
