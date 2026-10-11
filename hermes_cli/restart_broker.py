@@ -481,6 +481,7 @@ def run_once(
     results: list[dict[str, Any]] = []
     pending = sorted(paths.pending.glob("*.json"), key=lambda p: (p.stat().st_mtime, p.name))[:limit]
     for request_path in pending:
+        payload: Any = None
         try:
             payload = json.loads(request_path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
@@ -551,7 +552,7 @@ def run_once(
             _move_request(request_path, paths.done if ok else paths.failed, payload, result)
             results.append(result)
         except Exception as exc:
-            profile = str(locals().get("payload", {}).get("profile", "unknown")) if isinstance(locals().get("payload"), dict) else "unknown"
+            profile = str(payload.get("profile", "unknown")) if isinstance(payload, dict) else "unknown"
             result = {
                 "request": str(request_path),
                 "profile": profile,
@@ -561,10 +562,9 @@ def run_once(
             }
             if _PROFILE_RE.fullmatch(profile):
                 _write_status(paths, profile, result)
-            try:
-                payload_for_archive = payload if isinstance(payload, dict) else {"raw_error": "invalid payload"}
-            except UnboundLocalError:
-                payload_for_archive = {"raw_error": "unreadable payload"}
+            payload_for_archive = payload if isinstance(payload, dict) else {
+                "raw_error": "unreadable payload" if payload is None else "invalid payload"
+            }
             _move_request(request_path, paths.failed, payload_for_archive, result)
             results.append(result)
     return results

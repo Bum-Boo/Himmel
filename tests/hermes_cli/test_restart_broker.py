@@ -101,6 +101,41 @@ def test_run_once_rejects_not_allowlisted_request(tmp_path):
     assert list((tmp_path / "restart-requests" / "failed").glob("*.json"))
 
 
+@pytest.mark.parametrize("failure", ["malformed_json", "unreadable_file", "non_object_json"])
+def test_bad_request_does_not_reuse_previous_payload(tmp_path, monkeypatch, failure):
+    rb.write_default_config(
+        root=tmp_path,
+        allowed_profiles=["friren"],
+        allowed_requesters=["profilemanager"],
+    )
+    good = rb.create_request("friren", requested_by="profilemanager", root=tmp_path)
+    paths = rb.broker_paths(tmp_path)
+    bad = paths.pending / "bad.json"
+    bad.write_text("[]" if failure == "non_object_json" else "{bad", encoding="utf-8")
+    os.utime(good, (1_000, 1_000))
+    os.utime(bad, (2_000, 2_000))
+    if failure == "unreadable_file":
+        read_text = Path.read_text
+
+        def fail_bad_read(path, *args, **kwargs):
+            if path == bad:
+                raise OSError("request could not be read")
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_bad_read)
+
+    results = rb.run_once(root=tmp_path, dry_run=True, allow_in_gateway=True)
+
+    assert [result["status"] for result in results] == ["done", "failed"]
+    assert results[1]["profile"] == "unknown"
+    status = json.loads((paths.status / "friren.json").read_text(encoding="utf-8"))
+    assert status["status"] == "done"
+    archived = json.loads((paths.failed / bad.name).read_text(encoding="utf-8"))
+    assert "profile" not in archived
+    assert "nonce" not in archived
+    assert not bad.exists()
+
+
 def test_run_once_executes_systemctl_for_allowed_request(tmp_path, monkeypatch):
     rb.write_default_config(
         root=tmp_path,
