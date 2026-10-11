@@ -360,6 +360,15 @@ def _check_sustained_idle(
 
 def _write_status(paths: BrokerPaths, profile: str, status: dict[str, Any]) -> None:
     ensure_dirs(paths)
+    if status.get("status") == "deferred" and "finished_at" not in status:
+        # A waiting observation must not erase the completed action timestamp
+        # used by the cooldown check on the next broker tick.
+        try:
+            previous = json.loads(_status_file(paths, profile).read_text(encoding="utf-8"))
+            if isinstance(previous, dict) and previous.get("finished_at"):
+                status = {**status, "finished_at": previous["finished_at"]}
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            pass
     tmp = _status_file(paths, profile).with_suffix(".json.tmp")
     tmp.write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(_status_file(paths, profile))

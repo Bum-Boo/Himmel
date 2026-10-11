@@ -211,6 +211,38 @@ def test_missing_gateway_state_defers_request_fail_closed(tmp_path, monkeypatch)
     assert request.exists()
 
 
+def test_deferred_observation_preserves_restart_cooldown(tmp_path, monkeypatch):
+    rb.write_default_config(
+        root=tmp_path,
+        allowed_profiles=["friren"],
+        allowed_requesters=["profilemanager"],
+    )
+    _update_broker_config(tmp_path, cooldown_seconds=3600, minimum_idle_seconds=0)
+    calls = []
+    monkeypatch.setattr(
+        rb,
+        "_restart_unit",
+        lambda profile, config, dry_run=False: calls.append(profile) or {"ok": True},
+    )
+    _write_gateway_state(tmp_path, "friren", active_agents=0)
+    rb.create_request("friren", requested_by="profilemanager", root=tmp_path)
+    first = rb.run_once(root=tmp_path, allow_in_gateway=True)
+    assert first[0]["status"] == "done"
+
+    _write_gateway_state(tmp_path, "friren", active_agents=1)
+    rb.create_request("friren", requested_by="profilemanager", root=tmp_path)
+    deferred = rb.run_once(root=tmp_path, allow_in_gateway=True)
+    assert deferred[0]["status"] == "deferred"
+    status = json.loads((rb.broker_paths(tmp_path).status / "friren.json").read_text())
+    assert status["finished_at"] == first[0]["finished_at"]
+
+    _write_gateway_state(tmp_path, "friren", active_agents=0)
+    blocked = rb.run_once(root=tmp_path, allow_in_gateway=True)
+    assert blocked[0]["status"] == "failed"
+    assert "Cooldown active" in blocked[0]["error"]
+    assert calls == ["friren"]
+
+
 def test_request_runs_only_after_four_continuous_idle_minutes(tmp_path, monkeypatch):
     rb.write_default_config(
         root=tmp_path,
