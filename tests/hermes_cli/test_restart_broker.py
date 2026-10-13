@@ -101,6 +101,41 @@ def test_run_once_rejects_not_allowlisted_request(tmp_path):
     assert list((tmp_path / "restart-requests" / "failed").glob("*.json"))
 
 
+@pytest.mark.parametrize("failure", ["malformed_json", "unreadable_file", "non_object_json"])
+def test_bad_request_does_not_reuse_previous_payload(tmp_path, monkeypatch, failure):
+    rb.write_default_config(
+        root=tmp_path,
+        allowed_profiles=["friren"],
+        allowed_requesters=["profilemanager"],
+    )
+    good = rb.create_request("friren", requested_by="profilemanager", root=tmp_path)
+    paths = rb.broker_paths(tmp_path)
+    bad = paths.pending / "bad.json"
+    bad.write_text("[]" if failure == "non_object_json" else "{bad", encoding="utf-8")
+    os.utime(good, (1_000, 1_000))
+    os.utime(bad, (2_000, 2_000))
+    if failure == "unreadable_file":
+        read_text = Path.read_text
+
+        def fail_bad_read(path, *args, **kwargs):
+            if path == bad:
+                raise OSError("request could not be read")
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_bad_read)
+
+    results = rb.run_once(root=tmp_path, dry_run=True, allow_in_gateway=True)
+
+    assert [result["status"] for result in results] == ["done", "failed"]
+    assert results[1]["profile"] == "unknown"
+    status = json.loads((paths.status / "friren.json").read_text(encoding="utf-8"))
+    assert status["status"] == "done"
+    archived = json.loads((paths.failed / bad.name).read_text(encoding="utf-8"))
+    assert "profile" not in archived
+    assert "nonce" not in archived
+    assert not bad.exists()
+
+
 def test_run_once_executes_systemctl_for_allowed_request(tmp_path, monkeypatch):
     rb.write_default_config(
         root=tmp_path,
@@ -174,6 +209,38 @@ def test_missing_gateway_state_defers_request_fail_closed(tmp_path, monkeypatch)
     assert result[0]["status"] == "deferred"
     assert result[0]["activity"]["available"] is False
     assert request.exists()
+
+
+def test_deferred_observation_preserves_restart_cooldown(tmp_path, monkeypatch):
+    rb.write_default_config(
+        root=tmp_path,
+        allowed_profiles=["friren"],
+        allowed_requesters=["profilemanager"],
+    )
+    _update_broker_config(tmp_path, cooldown_seconds=3600, minimum_idle_seconds=0)
+    calls = []
+    monkeypatch.setattr(
+        rb,
+        "_restart_unit",
+        lambda profile, config, dry_run=False: calls.append(profile) or {"ok": True},
+    )
+    _write_gateway_state(tmp_path, "friren", active_agents=0)
+    rb.create_request("friren", requested_by="profilemanager", root=tmp_path)
+    first = rb.run_once(root=tmp_path, allow_in_gateway=True)
+    assert first[0]["status"] == "done"
+
+    _write_gateway_state(tmp_path, "friren", active_agents=1)
+    rb.create_request("friren", requested_by="profilemanager", root=tmp_path)
+    deferred = rb.run_once(root=tmp_path, allow_in_gateway=True)
+    assert deferred[0]["status"] == "deferred"
+    status = json.loads((rb.broker_paths(tmp_path).status / "friren.json").read_text())
+    assert status["finished_at"] == first[0]["finished_at"]
+
+    _write_gateway_state(tmp_path, "friren", active_agents=0)
+    blocked = rb.run_once(root=tmp_path, allow_in_gateway=True)
+    assert blocked[0]["status"] == "failed"
+    assert "Cooldown active" in blocked[0]["error"]
+    assert calls == ["friren"]
 
 
 def test_request_runs_only_after_four_continuous_idle_minutes(tmp_path, monkeypatch):
