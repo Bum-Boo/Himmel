@@ -12,7 +12,7 @@
   재현한 뒤 수정했다(§3.1).
 - 이 VM(루트 실행, IPv6 없음, DNS 없음, SQLite 3.45.1, 최소화 Ubuntu)에서 전체 스위트를 돌려
   CI에서는 가려져 있던 **비밀폐(non-hermetic) 테스트 19개 파일 / 30개 실패**를 찾았고, 그중 FTS 2건을 뺀
-  전부를 수정했다. 남은 2건은 실제 제품 결함(SQLite 3.45.x 한정)으로 판단해 테스트를 약화하지 않고 남겼다(§4.1).
+  전부를 수정했다. CI 동등(관리형 Python) 전체 실행에서 드러난 병렬 경합 1건도 고쳤다. 남은 2건은 실제 제품 결함(SQLite 3.45.x 한정)으로 판단해 테스트를 약화하지 않고 남겼다(§4.1).
 - `check-attribution`은 매핑 파일을 추가하지 않았다. 필요한 파일은 §5.
 - PR #6은 이번 수정 후 테스트는 통과하지만 `check-attribution`은 그대로 실패한다(§6).
 
@@ -30,16 +30,16 @@ uv sync --locked --python 3.11 --extra all --extra dev --extra anthropic --extra
 
 | 명령 | 이전(인계 시점 브랜치 tip `bcea054`) | 이후(본 브랜치) |
 |---|---|---|
-| `scripts/run_tests.sh` (시스템 venv) | 3056 파일, 34556 통과 / **30 실패** / 350 스킵 | __SYSTEM_AFTER__ |
-| `scripts/run_tests.sh` (관리형 venv, CI 동등) | (미실행; CI `main` 런 33090138425: slice 5에서 1 실패) | __MANAGED_AFTER__ |
+| `scripts/run_tests.sh` (시스템 venv) | 3056 파일, 34556 통과 / **30 실패** / 350 스킵 | 3056 파일, 34581 통과 / **2 실패**(§4.1 FTS) / 355 스킵, FLAKY 없음 |
+| `scripts/run_tests.sh` (관리형 venv, CI 동등) | (미실행; CI `main` 런 33090138425: slice 5에서 1 실패) | 3056 파일, 34602 통과 / 1 실패 / 335 스킵 → 실패는 병렬 실행 중 sdist 스테이징 경합(§3.3 50a8837로 수정, 단독 재실행 8/8 통과) |
 | `scripts/run_tests.sh tests/gateway/test_session_api.py` (main, 3회) | 20/20 통과 ×3 (경쟁 조건이라 이 VM에선 우연히 통과) | 20/20 통과 ×3 |
 | 위 테스트를 수정 전 본문 + 지연 주입으로 실행 | **1 실패** (CI와 동일 `TypeError: cannot unpack non-iterable NoneType`) | 통과 |
 | `ruff check .` | All checks passed | All checks passed |
 | `python scripts/check-windows-footguns.py --all` | 없음(985 파일) | 없음 |
-| `ty check` + `scripts/lint_diff.py` (main 대비, 권고용) | — | __TY_DIFF__ |
+| `ty check` + `scripts/lint_diff.py` (main 대비, 권고용) | — | ruff 0→0, ty 14169→14169(순증 0; 양쪽 동일한 `tools/checkpoint_manager.py` ty panic만 경로 차이로 표시) |
 | PR #6을 본 브랜치에 로컬 병합 후 `tests/hermes_cli/test_restart_broker.py tests/gateway/test_session_api.py` | — | 40/40 통과 |
 
-JS 레인: __JS__
+JS 레인: Node 22 / npm 10(CI는 Node 26 / npm 12). `npm ci --ignore-scripts` 성공. CI 매트릭스와 같은 방식으로 찾은 13개 `check*` 스크립트 중 12개 통과(경고만 있음). 실패 1개 `apps/desktop check:test:desktop:all`은 Electron 헤더 다운로드가 이 VM 프록시에서 403으로 막혀 node-gyp 재빌드가 실패한 환경 문제로, 검증 불가.
 
 ## 3. 변경 사항
 
@@ -66,7 +66,7 @@ JS 레인: __JS__
 | 9b35454 | 시스템 유닛 생성 시 대상 HOME 플러그인 import·디렉터리 생성 방지 (`hermes_cli/gateway.py`, `gateway/config.py`) | 제품 파일만 main으로 되돌리면 회귀 테스트 2개 실패, 복원 시 통과 | 검증된 결함 |
 | 72e8a37, 6834e1a | 브라우저 테스트가 실제 HERMES_HOME/npm 설치에 닿지 않게 | 전체 스위트 통과 | 검증된 결함(테스트) |
 | a41452e | IPv6 스택 없는 호스트에서 디버그 포트 탐색이 항상 점유 포트 반환 (`hermes_cli/browser_connect.py:236`) | 되돌리면 기존 테스트 포함 2개 실패(이 VM은 IPv6 없음) | 검증된 결함 |
-| ec8b7ed | FTS 검색 투영 테스트가 풀링된 리더를 추적 | 전체 스위트(양 venv) 통과 | 검증된 결함(테스트) |
+| ec8b7ed | FTS 검색 투영 테스트가 풀링된 리더를 추적 | 관리형 venv(SQLite 3.53.1, WAL)에서 main 버전은 1 실패, 수정 버전은 239/239 통과 | 검증된 결함(테스트) |
 | bcea054 | `HOME=/root` 같은 1단계 홈에서 `>> /root/.ssh/authorized_keys` 승인 우회 (`tools/approval.py:1229`) | 되돌리면 신규 4개 + 기존 `test_redirect_to_sensitive_target` 실패(루트 호스트) | 검증된 결함(보안) |
 
 추가로 3d0223b: 8c720f1의 스텁 대입이 `ty` 권고 diff에 새 `invalid-assignment`를 만들어서 `patch.object`와 실제
@@ -85,6 +85,7 @@ JS 레인: __JS__
 | 768db0d, ea86318 | `test_migrate_xai.py`, `test_lazy_deps_durable_target.py` | 루트는 chmod 권한을 무시 | 기존 `test_doctor_journal_modes.py:145` 패턴대로 루트일 때 스킵(Windows 안전한 `getattr(os, "geteuid")`) |
 | d5a981f | `test_state_db_malformed_repair.py` | SQLite 3.45는 `row N missing from index X`로 보고 | 두 문구 모두 허용(`hermes_cli/kanban_db.py:2028`과 동일). 복구 로직은 문구에 의존하지 않음 |
 | 9b04465 | `test_ssh_environment.py` | `ssh` 바이너리 없음(연결은 이미 목) | PATH 확인만 스텁 |
+| 50a8837 | `test_managed_runtime_resolution.py` | `test_packaging_build_guard.py`가 저장소 루트에서 실제 sdist를 빌드하면 setuptools가 `hermes_agent-<버전>/`을 cwd에 잠시 만든다. 병렬 실행 중 `rglob` 스캔이 그 사본(plugins 포함)을 보고 실패(관리형 venv 전체 실행에서 발생, 디렉터리 출현을 폴링으로 확인) | 최상위 `hermes_agent-*` 스테이징 트리 제외 + tmp 루트 회귀 테스트. 심어둔 스테이징 트리로 수정 전 실패/수정 후 통과 확인 |
 | b992a79 | `test_execution_flag_detection.py` | 최소화 이미지의 `/usr/bin/man`은 안내만 출력하고 exit 0 | `man -w ls`가 실제 페이지 경로를 줄 때만 실행 |
 
 ## 4. 수정하지 않은 발견
@@ -110,8 +111,8 @@ JS 레인: __JS__
 
 ### 4.3 테스트가 models.dev·DNS에 실제로 접속 — 정적 위험
 
-- CI는 위 테스트들에서 실제 DNS·models.dev에 접속하고 있었다. 수정한 파일 외에도 남아 있을 수 있다.
-  DNS가 없는 이 VM에서 전체 스위트를 통과시킨 것으로 DNS 의존은 대부분 제거됐다고 본다.
+- CI는 위 테스트들에서 실제 DNS·models.dev에 접속하고 있었다. DNS가 없는 이 VM에서 전체 스위트가
+  (FTS 2건 외) 통과했으므로, 실패로 드러나는 DNS 의존은 남아 있지 않다.
   models.dev는 디스크 캐시/백오프가 있어 오프라인에서 조용히 다른 경로를 탈 수 있으므로 완전히 확인하지 못했다.
 
 ## 5. `check-attribution` (매핑 미추가)
