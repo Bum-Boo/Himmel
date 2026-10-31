@@ -820,10 +820,13 @@ class TestFTS5Search:
         db.append_message("s1", role="user", content="after")
 
         statements = []
-        read_conn = db._get_read_conn() or db._conn
         traced_connections = [db._conn]
-        if read_conn is not db._conn:
-            traced_connections.append(read_conn)
+        # Trace the pooled reader that search_messages() will borrow. A fresh
+        # _get_read_conn() is never placed in the pool, so under WAL (SQLite
+        # builds without the WAL-reset bug) it would trace nothing.
+        with db._read_ctx() as read_conn:
+            if read_conn is not db._conn:
+                traced_connections.append(read_conn)
         for conn in traced_connections:
             conn.set_trace_callback(statements.append)
 
