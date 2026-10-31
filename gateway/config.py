@@ -1306,7 +1306,7 @@ class GatewayConfig:
         return "public"
 
 
-def load_gateway_config() -> GatewayConfig:
+def load_gateway_config(*, plugin_discovery: bool = True) -> GatewayConfig:
     """
     Load gateway configuration from multiple sources.
 
@@ -1315,6 +1315,13 @@ def load_gateway_config() -> GatewayConfig:
     2. ~/.hermes/config.yaml (primary user-facing config)
     3. ~/.hermes/gateway.json (legacy — provides defaults under config.yaml)
     4. Built-in defaults
+
+    ``plugin_discovery=False`` reads without running plugin discovery, so
+    only already-registered plugin platforms are bridged. Discovery is
+    per-HERMES_HOME: it imports that home's plugins and loads its config via
+    ``ensure_hermes_home()``, which creates the home skeleton. Callers that
+    only peek at another user's home (system-unit generation under sudo)
+    must not do either as root.
     """
     _home = get_hermes_home()
     gw_data: dict = {}
@@ -1560,8 +1567,9 @@ def load_gateway_config() -> GatewayConfig:
             # Iterate built-in platforms plus any registered plugin platforms
             # so plugin authors get the same shared-key bridging (#24836).
             try:
-                from hermes_cli.plugins import discover_plugins
-                discover_plugins()  # idempotent
+                if plugin_discovery:
+                    from hermes_cli.plugins import discover_plugins
+                    discover_plugins()  # idempotent
                 from gateway.platform_registry import platform_registry as _pr
             except Exception as e:
                 logger.debug("plugin discovery skipped: %s", e)
@@ -1814,7 +1822,7 @@ def load_gateway_config() -> GatewayConfig:
     config = GatewayConfig.from_dict(gw_data)
 
     # Override with environment variables
-    _apply_env_overrides(config)
+    _apply_env_overrides(config, plugin_discovery=plugin_discovery)
     
     # --- Validate loaded values ---
     _validate_gateway_config(config)
@@ -1884,7 +1892,7 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
                 pconfig.enabled = False
 
 
-def _apply_env_overrides(config: GatewayConfig) -> None:
+def _apply_env_overrides(config: GatewayConfig, *, plugin_discovery: bool = True) -> None:
     """Apply environment variable overrides to config."""
     getenv = _getenv_str
     getenv_int = _getenv_int
@@ -2602,8 +2610,9 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # already fixed for the same bug class in commit 7849a3d73; this is the
     # runtime counterpart.
     try:
-        from hermes_cli.plugins import discover_plugins
-        discover_plugins()  # idempotent
+        if plugin_discovery:
+            from hermes_cli.plugins import discover_plugins
+            discover_plugins()  # idempotent
         from gateway.platform_registry import platform_registry
         for entry in platform_registry.plugin_entries():
             try:

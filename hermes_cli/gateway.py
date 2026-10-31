@@ -3202,8 +3202,14 @@ def _stable_service_working_dir() -> str:
     return str(PROJECT_ROOT)
 
 
-def _systemd_watchdog_seconds(hermes_home: str | Path | None = None) -> int:
-    """Resolve the managed-overlay-aware watchdog setting for a service home."""
+def _systemd_watchdog_seconds(
+    hermes_home: str | Path | None = None, *, foreign_home: bool = False
+) -> int:
+    """Resolve the managed-overlay-aware watchdog setting for a service home.
+
+    ``foreign_home`` marks a home owned by another user (system units are
+    generated under sudo for the service account).
+    """
     override_token = None
     reset_home_override = None
     if hermes_home is not None:
@@ -3215,7 +3221,14 @@ def _systemd_watchdog_seconds(hermes_home: str | Path | None = None) -> int:
         override_token = set_hermes_home_override(hermes_home)
         reset_home_override = reset_hermes_home_override
     try:
-        config = load_gateway_config()
+        if foreign_home:
+            # Discovery inside the target override would import the service
+            # user's plugins as root and create a root-owned 0700
+            # HERMES_HOME skeleton there that the service then cannot open.
+            # The watchdog never depends on plugins.
+            config = load_gateway_config(plugin_discovery=False)
+        else:
+            config = load_gateway_config()
         return coerce_systemd_watchdog_seconds(
             getattr(config, "systemd_watchdog_seconds", 0)
         )
@@ -3231,10 +3244,10 @@ def _systemd_watchdog_seconds(hermes_home: str | Path | None = None) -> int:
 
 
 def _systemd_watchdog_service_fields(
-    hermes_home: str | Path | None = None,
+    hermes_home: str | Path | None = None, *, foreign_home: bool = False
 ) -> tuple[str, str]:
     """Return systemd service fields for the effective gateway config."""
-    seconds = _systemd_watchdog_seconds(hermes_home)
+    seconds = _systemd_watchdog_seconds(hermes_home, foreign_home=foreign_home)
     if seconds <= 0:
         return "simple", ""
     return "notify", f"NotifyAccess=main\nWatchdogSec={seconds}s\n"
@@ -3332,7 +3345,7 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
         username, group_name, home_dir = _system_service_identity(run_as_user)
         hermes_home = _hermes_home_for_target_user(home_dir)
         systemd_type, systemd_watchdog_directives = _systemd_watchdog_service_fields(
-            hermes_home
+            hermes_home, foreign_home=True
         )
         profile_arg = _profile_arg_for_target_user(hermes_home, home_dir)
         # Remap all paths that may resolve under the calling user's home
