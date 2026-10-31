@@ -107,3 +107,33 @@ class TestFindFreeDebugPort:
             pytest.skip("successor port unavailable to bind in this environment")
         finally:
             blocker.close()
+
+    def test_skips_occupied_successor_without_ipv6_stack(self, monkeypatch):
+        """A host with IPv6 disabled must still skip an occupied port.
+
+        Creating an AF_INET6 socket there fails with EAFNOSUPPORT; that used
+        to mark every candidate unbindable and return the occupied
+        ``preferred + 1`` fallback.
+        """
+        real_socket = socket.socket
+
+        def ipv4_only_socket(family=socket.AF_INET, *args, **kwargs):
+            if family == socket.AF_INET6:
+                raise OSError(97, "Address family not supported by protocol")
+            return real_socket(family, *args, **kwargs)
+
+        preferred = _free_port()
+        blocker = real_socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            try:
+                blocker.bind(("127.0.0.1", preferred + 1))
+            except OSError:
+                pytest.skip("successor port unavailable to bind in this environment")
+            blocker.listen(1)
+            monkeypatch.setattr(socket, "socket", ipv4_only_socket)
+            port = find_free_debug_port(preferred)
+        finally:
+            blocker.close()
+
+        assert port != preferred + 1
+        assert port > preferred

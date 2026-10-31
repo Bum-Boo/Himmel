@@ -236,7 +236,14 @@ def find_free_debug_port(preferred: int = DEFAULT_BROWSER_CDP_PORT, attempts: in
         bindable = True
         for family, host in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
             try:
-                with socket.socket(family, socket.SOCK_STREAM) as sock:
+                sock = socket.socket(family, socket.SOCK_STREAM)
+            except OSError:
+                # Host has no stack for this family (e.g. IPv6 disabled:
+                # EAFNOSUPPORT). Nothing can hold that loopback, so it must
+                # not veto every candidate and force the occupied fallback.
+                continue
+            try:
+                with sock:
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     sock.bind((host, port))
             except OSError:
