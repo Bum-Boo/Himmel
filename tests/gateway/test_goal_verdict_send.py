@@ -30,6 +30,12 @@ def hermes_home(tmp_path, monkeypatch):
     from hermes_cli import goals
 
     goals._DB_CACHE.clear()
+    # Open the goals SessionDB here, off the event loop. On a loop thread a
+    # cold cache only waits 0.25s for a background bootstrap and then
+    # degrades to None (by design), so GoalManager.set() inside an async
+    # test silently skips persisting when schema init is slower than that
+    # (e.g. journal_mode=DELETE on a SQLite build with the WAL-reset bug).
+    assert goals._get_session_db() is not None
     yield home
     goals._DB_CACHE.clear()
 
