@@ -95,9 +95,17 @@ class TestFindAgentBrowser:
              patch(
                  "tools.browser_tool._discover_homebrew_node_dirs",
                  return_value=[],
-             ):
+             ), \
+             patch(
+                 # The not-found path falls through to the lazy installer,
+                 # which runs scripts/install.sh --ensure browser (real npm
+                 # installs). Decline it instead of hitting the registry.
+                 "hermes_cli.dep_ensure.ensure_dependency",
+                 return_value=False,
+             ) as ensure_dependency:
             with pytest.raises(FileNotFoundError, match="agent-browser CLI not found"):
                 _find_agent_browser()
+        ensure_dependency.assert_called_once_with("browser")
 
     def test_finds_in_local_node_modules_bin(self):
         """Should fall through to the repo's node_modules/.bin when both the
