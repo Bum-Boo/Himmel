@@ -91,6 +91,11 @@ class TestAbiStamp:
         assert stamp.read_text().strip() == ld._python_abi_tag()
 
 
+    # chmod 0500 does not stop root (CAP_DAC_OVERRIDE) from creating the dir.
+    @pytest.mark.skipif(
+        getattr(os, "geteuid", lambda: -1)() == 0,
+        reason="root ignores file permissions",
+    )
     def test_readonly_target_reports_error(self, tmp_path):
         # A path under a non-writable parent should surface a clean error,
         # not raise.
