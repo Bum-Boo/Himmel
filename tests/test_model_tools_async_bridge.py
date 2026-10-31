@@ -352,6 +352,26 @@ class TestVisionDispatchLoopSafety:
     verify the event loop stays alive afterwards — the exact scenario
     from issue #2104."""
 
+    @pytest.fixture(autouse=True)
+    def _example_com_dns(self, monkeypatch):
+        """Resolve example.com offline for the image-source SSRF pre-flight.
+
+        tools.image_source._http_block_reason() calls is_safe_url(), which
+        resolves the host and fails closed on DNS errors. Unpatched, these
+        tests did live DNS and on a resolver-less host returned
+        "blocked: unsafe or private URL" before any mocked call ran.
+        """
+        import socket
+
+        real_getaddrinfo = socket.getaddrinfo
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            if host == "example.com":
+                return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", port or 0))]
+            return real_getaddrinfo(host, port, *args, **kwargs)
+
+        monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
     def test_vision_dispatch_keeps_loop_alive(self, tmp_path):
         """After dispatching vision_analyze via the registry, the event
         loop must remain open so cached async clients don't crash on GC."""
