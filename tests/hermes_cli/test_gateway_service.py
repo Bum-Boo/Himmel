@@ -1123,11 +1123,25 @@ class TestGeneratedUnitIncludesLocalBin:
     """~/.local/bin must be in PATH so uvx/pipx tools are discoverable."""
 
 
-    def test_system_unit_includes_local_bin_in_path(self, monkeypatch):
+    def test_system_unit_includes_local_bin_in_path(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
             gateway_cli,
             "_build_user_local_paths",
             lambda home_path, existing: [str(home_path / ".local" / "bin")],
+        )
+        # Pin a synthetic service account: the real identity comes from
+        # $SUDO_USER/$USER, which is "root" on a root-run host and is then
+        # (correctly) refused without --run-as-user.
+        service_home = tmp_path / "svc"
+        monkeypatch.setattr(
+            gateway_cli,
+            "_system_service_identity",
+            lambda _user: ("svc", "svc", str(service_home)),
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_hermes_home_for_target_user",
+            lambda home: str(service_home / ".hermes"),
         )
         unit = gateway_cli.generate_systemd_unit(system=True)
         # System unit uses the resolved home dir from _system_service_identity
