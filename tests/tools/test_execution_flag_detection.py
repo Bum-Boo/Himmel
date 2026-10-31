@@ -49,6 +49,15 @@ def test_real_binaries_execute_leading_dash_program_payload(
     """A PATH marker proves these binaries do not reparse '-program' as an option."""
     if shutil.which(tool) is None or (needs_tty and shutil.which("script") is None):
         pytest.skip(f"{tool} or script is not installed")
+    if tool == "man":
+        # Minimized images (Ubuntu cloud/containers) ship a stub /usr/bin/man
+        # that prints a notice and exits 0 without running a pager, so the
+        # payload can't be observed there. Real man-db prints the page path.
+        located = subprocess.run(
+            ["man", "-w", "ls"], capture_output=True, text=True, timeout=20
+        ).stdout.strip()
+        if not located or not os.path.exists(located.splitlines()[0]):
+            pytest.skip("man cannot locate the ls page (minimized system)")
 
     marker = tmp_path / "executed"
     payload = tmp_path / "-payload-marker"
