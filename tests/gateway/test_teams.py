@@ -4,7 +4,7 @@ import json
 import sys
 import types
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -169,8 +169,32 @@ _ensure_teams_mock()
 _teams_mod = load_plugin_adapter("teams")
 
 _teams_mod.AIOHTTP_AVAILABLE = True
-# SDK import is deferred (#62935); bind mocked symbols the same way connect() does.
-assert _teams_mod.check_teams_requirements() is True
+
+
+def _bind_mocked_teams_sdk() -> bool:
+    """Bind the mocked SDK symbols the same way connect() does (#62935).
+
+    This runs at import time, before the autouse conftest fixture that sets
+    HERMES_DISABLE_LAZY_INSTALLS, and the real ``microsoft-teams-apps`` dist
+    is not in the test venv — so an unguarded call would pip-install it from
+    PyPI during collection (and fail collection offline). The sys.modules
+    mocks already satisfy the importer, so only the install step is stubbed.
+    """
+    from tools import lazy_deps
+
+    def _no_install(specs):
+        raise AssertionError(f"test_teams must not lazy-install {specs!r}")
+
+    original = lazy_deps._venv_pip_install
+    lazy_deps._venv_pip_install = _no_install
+    try:
+        with patch.object(lazy_deps, "feature_missing", return_value=()):
+            return _teams_mod.check_teams_requirements()
+    finally:
+        lazy_deps._venv_pip_install = original
+
+
+assert _bind_mocked_teams_sdk() is True
 _teams_mod.TEAMS_SDK_AVAILABLE = True
 
 # Ensure SDK symbols that were None (import failed on Python <3.12) are
@@ -207,6 +231,21 @@ class TestTeamsRequirements:
         monkeypatch.setattr(_teams_mod, "TEAMS_SDK_AVAILABLE", True)
         monkeypatch.setattr(_teams_mod, "AIOHTTP_AVAILABLE", True)
         assert check_requirements() is True
+
+    def test_module_bind_never_lazy_installs(self, monkeypatch):
+        # Regression: the import-time bind used to reach a real PyPI install
+        # of microsoft-teams-apps because it runs before the conftest fixture
+        # that disables lazy installs.
+        from tools import lazy_deps
+
+        installs = []
+        monkeypatch.delenv("HERMES_DISABLE_LAZY_INSTALLS", raising=False)
+        monkeypatch.setattr(lazy_deps, "_venv_pip_install", lambda specs: installs.append(specs))
+        monkeypatch.setattr(_teams_mod, "App", None)
+
+        assert _bind_mocked_teams_sdk() is True
+        assert installs == []
+        assert _teams_mod.App is sys.modules["microsoft_teams.apps"].App
 
     def test_check_teams_requirements_shortcircuits_when_present(self, monkeypatch):
         # When SDK symbols are already bound and aiohttp is available, the
