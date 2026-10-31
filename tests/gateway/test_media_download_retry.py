@@ -385,6 +385,43 @@ class TestSlackAttachmentDiagnostics:
 # SlackAdapter._download_slack_file
 # ---------------------------------------------------------------------------
 
+_SLACK_FILES_IP = "34.120.0.10"  # synthetic public address
+
+
+@pytest.fixture
+def slack_files_dns(monkeypatch):
+    """Resolve files.slack.com offline so the real SSRF guard still runs.
+
+    _download_slack_file{,_bytes} call is_safe_url(), which resolves the host.
+    Without this the tests did live DNS against Slack and failed on any
+    resolver-less host ("Blocked unsafe Slack file URL").
+    """
+    real_getaddrinfo = socket.getaddrinfo
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        if host == "files.slack.com":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (_SLACK_FILES_IP, port or 0))]
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+
+def test_slack_files_dns_fixture_keeps_ssrf_guard_live(slack_files_dns, monkeypatch):
+    """The fixture fakes DNS only: a private answer must still be blocked."""
+    from tools.url_safety import is_safe_url
+
+    assert is_safe_url("https://files.slack.com/img.jpg") is True
+    monkeypatch.setattr(
+        socket,
+        "getaddrinfo",
+        lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443))],
+    )
+    adapter = _make_slack_adapter()
+    with pytest.raises(ValueError, match="SSRF protection"):
+        asyncio.run(adapter._download_slack_file("https://files.slack.com/img.jpg", ext=".jpg"))
+
+
+@pytest.mark.usefixtures("slack_files_dns")
 class TestSlackDownloadSlackFile:
     """Tests for SlackAdapter._download_slack_file"""
 
@@ -447,6 +484,7 @@ class TestSlackDownloadSlackFile:
 # SlackAdapter._download_slack_file_bytes
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("slack_files_dns")
 class TestSlackDownloadSlackFileBytes:
     """Tests for SlackAdapter._download_slack_file_bytes"""
 
