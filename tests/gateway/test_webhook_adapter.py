@@ -41,6 +41,15 @@ from gateway.platforms.webhook import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _host_has_ipv6_stack() -> bool:
+    """True when the kernel can create an AF_INET6 socket at all."""
+    try:
+        socket.socket(socket.AF_INET6, socket.SOCK_STREAM).close()
+    except OSError:
+        return False
+    return True
+
+
 def _make_config(
     routes=None,
     secret="",
@@ -926,6 +935,10 @@ class TestDualStackBind:
             has_v6 = any(len(a) == 4 for a in addrs)
             has_v4 = any(len(a) == 2 for a in addrs)
             assert has_v4, f"IPv4 bind missing — got {addrs}"
+            if not _host_has_ipv6_stack():
+                # A v4-only kernel (EAFNOSUPPORT) cannot open a v6 listener;
+                # the dual-stack default must still come up on v4 there.
+                pytest.skip(f"host has no IPv6 stack; v4-only bind verified: {addrs}")
             assert has_v6, (
                 f"IPv6 bind missing (the 6PN reachability bug) — got {addrs}"
             )
