@@ -28,6 +28,17 @@ _MOCK_VALIDATION = {
 }
 
 
+_SYNTHETIC_MODELS_DEV = {
+    "meta": {
+        "id": "meta",
+        "name": "Meta",
+        "env": ["META_API_KEY"],
+        "api": "https://api.meta.ai/v1",
+        "models": {},
+    }
+}
+
+
 def _run_openai_switch(
     raw_input: str,
     current_provider: str = "openrouter",
@@ -38,6 +49,10 @@ def _run_openai_switch(
 ):
     """Run switch_model with OpenAI-direct mocks and return the result."""
     with (
+        # ``meta`` has no Hermes overlay; it is known only from the models.dev
+        # catalog. Serve a synthetic entry instead of fetching models.dev live
+        # (offline the switch reported "Unknown provider 'meta'").
+        patch("agent.models_dev.fetch_models_dev", return_value=_SYNTHETIC_MODELS_DEV),
         patch("hermes_cli.model_switch.resolve_alias", return_value=None),
         patch("hermes_cli.model_switch.list_provider_models", return_value=[]),
         patch(
