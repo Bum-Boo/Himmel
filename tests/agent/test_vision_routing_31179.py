@@ -163,8 +163,51 @@ auxiliary:
 # ---------------------------------------------------------------------------
 
 
+def _fake_models_dev(monkeypatch, *, input_modalities):
+    """Serve a synthetic models.dev catalog instead of fetching models.dev.
+
+    The text-only guard reads capability data via
+    get_model_capabilities(allow_network=True). Unpatched, the test fetched
+    https://models.dev/api.json live; offline the lookup is "unknown" and the
+    guard (by design) falls back to attempting the main provider.
+    """
+    import agent.models_dev as models_dev
+
+    catalog = {
+        "deepseek": {
+            "models": {
+                "deepseek-v4-pro": {
+                    "id": "deepseek-v4-pro",
+                    "attachment": False,
+                    "tool_call": True,
+                    "modalities": {"input": list(input_modalities), "output": ["text"]},
+                    "limit": {"context": 128000, "output": 8192},
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(models_dev, "fetch_models_dev", lambda *a, **k: catalog)
+
+
 class TestTextOnlyMainSkippedForVision:
     """Vision auto-detect must not return a text-only main-provider client."""
+
+    def test_catalog_vision_main_is_kept(self, isolated_home, monkeypatch):
+        """Control: the same setup with an image-capable catalog entry keeps
+        the main provider, so the skip above is driven by catalog data."""
+        _write_config(isolated_home, """
+model:
+  provider: deepseek
+  default: deepseek-v4-pro
+""")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        _fake_models_dev(monkeypatch, input_modalities=["text", "image"])
+        _fresh_modules()
+
+        from agent.auxiliary_client import resolve_vision_provider_client
+        provider, client, _model = resolve_vision_provider_client(provider="auto")
+        assert client is not None
+        assert provider == "deepseek"
 
     def test_text_only_main_skipped_when_no_aggregator(self, isolated_home, monkeypatch):
         """DeepSeek main + no aggregator credentials → no client built.
@@ -178,6 +221,7 @@ model:
   default: deepseek-v4-pro
 """)
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+        _fake_models_dev(monkeypatch, input_modalities=["text"])
         _fresh_modules()
 
         from agent.auxiliary_client import resolve_vision_provider_client
