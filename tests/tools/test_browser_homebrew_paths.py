@@ -425,6 +425,7 @@ class TestRunBrowserCommandPathConstruction:
         }
 
         fake_json = json.dumps({"success": True})
+        hermes_home = str(tmp_path / "hermes-home")
         real_isdir = os.path.isdir
 
         def selective_isdir(path):
@@ -447,13 +448,25 @@ class TestRunBrowserCommandPathConstruction:
              patch("os.open", return_value=99), \
              patch("os.close"), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "HOME": "/home/test"}, clear=True):
+             patch.dict(
+                 os.environ,
+                 {
+                     "PATH": "/usr/bin:/bin",
+                     "HOME": "/home/test",
+                     # clear=True would otherwise drop the isolated HERMES_HOME
+                     # and fall back to the real /home/test/.hermes.
+                     "HERMES_HOME": hermes_home,
+                 },
+                 clear=True,
+             ):
             with patch("builtins.open", mock_open(read_data=fake_json)):
                 _run_browser_command("test-task", "navigate", ["https://example.com"])
 
         result_path = captured_env.get("PATH", "")
         assert "/data/data/com.termux/files/usr/bin" in result_path
         assert "/data/data/com.termux/files/usr/sbin" in result_path
+        # The run must stay on the isolated home, not the fake HOME's .hermes.
+        assert captured_env.get("HERMES_HOME") == hermes_home
 
 
 class TestRunChromeFallbackCommandNpxResolution:
