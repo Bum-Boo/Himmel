@@ -527,6 +527,49 @@ class TestWindowsAbsolutePathFolding:
         assert key is None
 
 
+class TestSingleComponentHomeFolding:
+    """A one-component home (root's /root, a container's /app) must fold too.
+
+    Regression: the degenerate-home guard refused every home with fewer than
+    two components, so an agent running as root could append to
+    /root/.ssh/authorized_keys by absolute path without an approval prompt.
+    """
+
+    @pytest.mark.parametrize("home", ["/root", "/app"])
+    def test_sensitive_writes_under_single_component_home_flagged(self, monkeypatch, home):
+        monkeypatch.setenv("HOME", home)
+        for cmd in (
+            f"cat key >> {home}/.ssh/authorized_keys",
+            f"echo 'pwned' >> {home}/.bashrc",
+            f"cp evil {home}/.ssh/authorized_keys",
+        ):
+            dangerous, key, _ = detect_dangerous_command(cmd)
+            assert dangerous is True, cmd
+            assert key is not None
+
+    def test_unrelated_and_mid_path_matches_not_folded(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/root")
+        for cmd in (
+            "cp report.txt /root/notes.txt",
+            # /mnt/root is not the home; folding it mid-path would be wrong.
+            "cat key >> /mnt/root/.ssh/authorized_keys",
+        ):
+            dangerous, key, _ = detect_dangerous_command(cmd)
+            assert dangerous is False, cmd
+            assert key is None
+
+    def test_system_root_home_is_not_folded(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/etc")
+        dangerous, _, desc = detect_dangerous_command("echo x > /etc/hosts")
+        assert dangerous is True
+        assert "system config" in desc.lower()
+
+    def test_root_home_delete_stays_hardline(self, monkeypatch):
+        monkeypatch.setenv("HOME", "/root")
+        for cmd in ("rm -rf /root", "rm -rf /root/", "rm -rf /root/*"):
+            assert detect_hardline_command(cmd)[0] is True, cmd
+
+
 class TestProjectSensitiveTeePattern:
     def test_tee_to_dotenv_with_trailing_file_arg_requires_approval(self):
         # tee writes to every file argument, so `.env` is overwritten even when

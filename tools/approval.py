@@ -1196,6 +1196,11 @@ def _normalize_command_for_detection(command: str) -> str:
 _PATH_TOKEN_STOP = r"""\s'"`;|&<>()"""
 # One path segment (no separators, no terminators) preceded by a separator.
 _PATH_TAIL = r"(?P<tail>(?:[/\\][^/\\" + _PATH_TOKEN_STOP + r"]*)+)"
+# Top-level system directories never treated as a one-component home: the
+# dangerous/hardline patterns match them literally (/etc/, /dev/sd, /usr, ...).
+_SYSTEM_ROOT_HOMES = frozenset(
+    {"etc", "usr", "var", "bin", "sbin", "lib", "boot", "dev", "home", "private"}
+)
 
 
 @functools.lru_cache(maxsize=64)
@@ -1210,9 +1215,10 @@ def _home_prefix_fold_regex(path: str):
     patterns (``~/.ssh/authorized_keys``) still match. The trailing tail is
     required (``+``), so a bare home with no path under it is not folded.
 
-    Returns ``None`` for an unset or degenerate path — one with fewer than two
-    components below the root — so a stray HOME / HERMES_HOME such as ``/``,
-    ``C:\\`` or ``""`` cannot rewrite unrelated filesystem prefixes. Cached
+    Returns ``None`` for an unset or degenerate path — no component below the
+    root, a bare drive, or a one-component system root such as ``/etc`` — so a
+    stray HOME / HERMES_HOME such as ``/``, ``C:\\`` or ``""`` cannot rewrite
+    unrelated filesystem prefixes. Cached
     because the resolved home is stable across calls on this hot path.
     """
     if not path:
@@ -1223,7 +1229,21 @@ def _home_prefix_fold_regex(path: str):
     # ``/home`` does not); for Windows it rejects a bare drive root (``C:\\``)
     # while accepting a real home (``C:\\Users\\alice``).
     if len(components) < 2:
-        return None
+        # A one-component POSIX home is still a real home: /root (the agent
+        # running as root) or /app, /workspace in containers. Refusing it let
+        # `cat key >> /root/.ssh/authorized_keys` pass as safe. Only the system
+        # roots that DANGEROUS/HARDLINE patterns match literally stay refused,
+        # and the fold is anchored to a token start so /etc/root/... or
+        # /mnt/root/... is never rewritten mid-path.
+        if (
+            len(components) != 1
+            or not path.startswith("/")
+            or components[0] in _SYSTEM_ROOT_HOMES
+        ):
+            return None
+        return re.compile(
+            r"(?<![^" + _PATH_TOKEN_STOP + r"=])/" + re.escape(components[0]) + _PATH_TAIL
+        )
     body = r"[/\\]+".join(re.escape(c) for c in components)
     # Optional leading root separator (POSIX ``/`` or UNC ``\\``); a Windows
     # drive letter is captured as the first component.
