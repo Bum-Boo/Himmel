@@ -182,16 +182,12 @@ def _bind_mocked_teams_sdk() -> bool:
     """
     from tools import lazy_deps
 
-    def _no_install(specs):
+    def _no_install(specs, *, timeout=300):
         raise AssertionError(f"test_teams must not lazy-install {specs!r}")
 
-    original = lazy_deps._venv_pip_install
-    lazy_deps._venv_pip_install = _no_install
-    try:
-        with patch.object(lazy_deps, "feature_missing", return_value=()):
-            return _teams_mod.check_teams_requirements()
-    finally:
-        lazy_deps._venv_pip_install = original
+    with patch.object(lazy_deps, "_venv_pip_install", _no_install), \
+         patch.object(lazy_deps, "feature_missing", return_value=()):
+        return _teams_mod.check_teams_requirements()
 
 
 assert _bind_mocked_teams_sdk() is True
