@@ -15,6 +15,7 @@ that actually reaches the Bot API.
 
 from __future__ import annotations
 
+import socket
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
@@ -50,6 +51,25 @@ _ensure_telegram_mock()
 from gateway.config import PlatformConfig  # noqa: E402
 from plugins.platforms.telegram import adapter as tg  # noqa: E402
 from plugins.platforms.telegram.adapter import TelegramAdapter  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _example_com_dns(monkeypatch):
+    """Resolve example.com offline.
+
+    send_image() runs is_safe_url() first, which resolves the host and fails
+    closed on a DNS error (no proxy is configured under the test runner).
+    Without this the test needed live DNS, and on a resolver-less host the
+    URL was rejected and send_image fell through to the base text path.
+    """
+    real_getaddrinfo = socket.getaddrinfo
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        if host == "example.com":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.215.14", port or 0))]
+        return real_getaddrinfo(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
 
 
 @pytest.fixture
