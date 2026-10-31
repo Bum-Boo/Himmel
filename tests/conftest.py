@@ -908,6 +908,41 @@ def mock_config():
     }
 
 
+@pytest.fixture()
+def fake_public_dns(monkeypatch):
+    """Resolve chosen hostnames offline to a synthetic public IPv4.
+
+    URL-safety guards (``tools.url_safety.is_safe_url``) resolve the host
+    and fail closed on DNS errors when no proxy is configured — which is the
+    case under ``scripts/run_tests.sh``. A test that passes a real-looking
+    URL through such a guard otherwise depends on live DNS and fails on a
+    resolver-less host. Only the registered names are faked; every other
+    lookup goes to the real resolver, so private/metadata answers stay
+    blocked. Usage::
+
+        def test_x(fake_public_dns):
+            fake_public_dns("example.com")
+    """
+    import socket
+
+    real_getaddrinfo = socket.getaddrinfo
+    answers: dict[str, str] = {}
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        ip = answers.get(str(host).lower().rstrip("."))
+        if ip is None:
+            return real_getaddrinfo(host, port, *args, **kwargs)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port or 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    def register(*hosts: str, ip: str = "93.184.215.14") -> None:
+        for host in hosts:
+            answers[host.lower().rstrip(".")] = ip
+
+    return register
+
+
 # ── Per-test timeout — handled by the isolation plugin ─────────────────────
 #
 # The subprocess-per-test plugin enforces the configured ``isolate_timeout``

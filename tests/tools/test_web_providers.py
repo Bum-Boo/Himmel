@@ -246,7 +246,9 @@ class TestDispatchersTriggerPluginDiscovery:
 
         return _restore
 
-    def test_web_extract_tool_runs_discovery_before_registry_lookup(self, monkeypatch):
+    def test_web_extract_tool_runs_discovery_before_registry_lookup(
+        self, monkeypatch, fake_public_dns
+    ):
         """``web_extract_tool`` must invoke ``_ensure_web_plugins_loaded()``
         before looking up the configured backend so the registry is
         populated even from cold-start subprocess contexts.
@@ -261,6 +263,10 @@ class TestDispatchersTriggerPluginDiscovery:
         import json
         from unittest.mock import MagicMock
         from agent.web_search_provider import WebSearchProvider
+
+        # web_extract_tool screens URLs with is_safe_url(), which needs DNS;
+        # offline it returned early, before the discovery hook under test.
+        fake_public_dns("example.com")
         from agent import web_search_registry
         from tools import web_tools
 

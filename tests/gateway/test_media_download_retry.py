@@ -385,25 +385,15 @@ class TestSlackAttachmentDiagnostics:
 # SlackAdapter._download_slack_file
 # ---------------------------------------------------------------------------
 
-_SLACK_FILES_IP = "34.120.0.10"  # synthetic public address
-
-
 @pytest.fixture
-def slack_files_dns(monkeypatch):
+def slack_files_dns(fake_public_dns):
     """Resolve files.slack.com offline so the real SSRF guard still runs.
 
     _download_slack_file{,_bytes} call is_safe_url(), which resolves the host.
     Without this the tests did live DNS against Slack and failed on any
     resolver-less host ("Blocked unsafe Slack file URL").
     """
-    real_getaddrinfo = socket.getaddrinfo
-
-    def fake_getaddrinfo(host, port, *args, **kwargs):
-        if host == "files.slack.com":
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (_SLACK_FILES_IP, port or 0))]
-        return real_getaddrinfo(host, port, *args, **kwargs)
-
-    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    fake_public_dns("files.slack.com", ip="34.120.0.10")
 
 
 def test_slack_files_dns_fixture_keeps_ssrf_guard_live(slack_files_dns, monkeypatch):
