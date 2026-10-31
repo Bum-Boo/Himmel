@@ -442,8 +442,19 @@ async def test_session_chat_stream_treats_pre_existing_poisoned_row_as_no_model(
     async def fake_run(**kwargs):
         return {"final_response": "ok", "session_id": session_id}, {"total_tokens": 1}
 
+    real_history = adapter._conversation_history_for_session
+
+    async def slow_history(sid):
+        # Widen the window before _run_agent is reached. A test that closes
+        # the client without reading the SSE body disconnects inside it, and
+        # the handler (correctly) cancels the run — the CI failure since the
+        # 2026-08-27 run. Holding it open makes that race deterministic.
+        await asyncio.sleep(0.2)
+        return await real_history(sid)
+
     app = _create_session_app(adapter)
-    with patch.object(adapter, "_run_agent", side_effect=fake_run) as mock_run:
+    with patch.object(adapter, "_run_agent", side_effect=fake_run) as mock_run, \
+         patch.object(adapter, "_conversation_history_for_session", side_effect=slow_history):
         async with TestClient(TestServer(app)) as cli:
             resp = await cli.post(
                 f"/api/sessions/{session_id}/chat/stream",
