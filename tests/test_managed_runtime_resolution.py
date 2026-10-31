@@ -119,14 +119,36 @@ def _iter_which_calls(tree: ast.AST):
             yield first.value, node.lineno
 
 
+# setuptools stages an sdist release tree as ``<name>-<version>/`` in the
+# build's cwd. tests/test_packaging_build_guard.py builds a real sdist from the
+# repo root, so under the parallel runner this scan could see that transient
+# copy of the sources (plugins/ included) and report every lookup twice.
+_SDIST_STAGING_PREFIX = "hermes_agent-"
+
+
 def _source_files() -> list[Path]:
     files: list[Path] = []
     for path in REPO_ROOT.rglob("*.py"):
         rel = path.relative_to(REPO_ROOT)
-        if rel.parts and rel.parts[0] in _EXEMPT_DIRS:
+        if rel.parts and (
+            rel.parts[0] in _EXEMPT_DIRS
+            or (len(rel.parts) > 1 and rel.parts[0].startswith(_SDIST_STAGING_PREFIX))
+        ):
             continue
         files.append(path)
     return files
+
+
+def test_sdist_staging_tree_is_not_scanned(tmp_path, monkeypatch):
+    staged = tmp_path / "hermes_agent-0.0.0" / "plugins" / "x.py"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("import shutil\nshutil.which('uv')\n", encoding="utf-8")
+    real = tmp_path / "hermes_cli" / "y.py"
+    real.parent.mkdir()
+    real.write_text("import shutil\nshutil.which('uv')\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+
+    assert _source_files() == [real]
 
 
 def _findings() -> list[tuple[str, str, int]]:
