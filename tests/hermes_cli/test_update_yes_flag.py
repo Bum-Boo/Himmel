@@ -12,7 +12,25 @@ import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from hermes_cli.main import cmd_update
+
+
+@pytest.fixture(autouse=True)
+def _patch_gateway_discovery():
+    """Keep cmd_update's gateway auto-restart phase off live processes.
+
+    These tests drive cmd_update end to end without mocking gateway
+    discovery, so the restart phase scanned the host. Under the parallel
+    runner another test file's gateway-like process was found, os.kill was
+    stopped by the conftest live-system guard, and the update exited 1.
+    Same fixture as tests/hermes_cli/test_cmd_update.py.
+    """
+    with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
+         patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
+         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]):
+        yield
 
 
 def _make_run_side_effect(
